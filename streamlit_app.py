@@ -1,14 +1,13 @@
 import streamlit as st
 import os
-import sys
 import json
 import requests
-from io import StringIO
 from typing import List, Dict, Tuple
 from urllib.parse import quote_plus
 
 # ─────────────────────────────────────────────
-# CONFIG
+# CONFIG - reads from Streamlit secrets or env vars only
+# No hardcoded keys anywhere in this file
 # ─────────────────────────────────────────────
 def get_config():
     try:
@@ -29,6 +28,7 @@ def get_config():
             "NAMESPACE":       st.secrets.get("NAMESPACE", "default"),
         }
     except Exception:
+        # Fallback to environment variables for local development
         return {
             "GEMINI_API_KEY":  os.getenv("GEMINI_API_KEY", ""),
             "PINECONE_API_KEY": os.getenv("PINECONE_API_KEY", ""),
@@ -51,6 +51,12 @@ def get_db_uri(config, db_name):
         f"mysql+pymysql://{config['DB_USER']}:{quote_plus(config['DB_PASS'])}"
         f"@{config['DB_HOST']}:{config['DB_PORT']}/{db_name}"
     )
+
+def validate_config(config):
+    """Check all required keys are present"""
+    required = ["GEMINI_API_KEY", "PINECONE_API_KEY", "DB_HOST", "DB_USER", "DB_PASS", "INDEX_HOST"]
+    missing = [k for k in required if not config.get(k)]
+    return missing
 
 # ─────────────────────────────────────────────
 # GEMINI API HELPER
@@ -157,11 +163,7 @@ def summarize_answer(user_request, answer, api_key):
 def get_db_catalog(config):
     from sqlalchemy import create_engine, text as _text
     lines = ["CATALOG (databases → tables):"]
-    for db_key, db_name in [
-        ("DB_CAMPDB", config["DB_CAMPDB"]),
-        ("DB_CAMP_DIR", config["DB_CAMP_DIR"]),
-        ("DB_COMMON", config["DB_COMMON"])
-    ]:
+    for db_name in [config["DB_CAMPDB"], config["DB_CAMP_DIR"], config["DB_COMMON"]]:
         try:
             engine = create_engine(get_db_uri(config, db_name), pool_pre_ping=True)
             with engine.connect() as conn:
@@ -182,9 +184,9 @@ def run_case1(user_text, config):
     from langchain import hub
     from langgraph.prebuilt import create_react_agent
 
+    # Set API key from config only - never hardcoded
     os.environ["GOOGLE_API_KEY"] = config["GEMINI_API_KEY"]
 
-    # Init LLM
     llm, model_used = None, None
     for name in ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.0-pro-exp"]:
         try:
@@ -196,7 +198,6 @@ def run_case1(user_text, config):
     if not llm:
         return "Could not initialize Gemini model."
 
-    # Connect to primary DB
     try:
         db = SQLDatabase.from_uri(
             get_db_uri(config, config["DB_CAMPDB"]),
@@ -205,7 +206,6 @@ def run_case1(user_text, config):
     except Exception as e:
         return f"Database connection error: {e}"
 
-    # Build agent
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
     tools = toolkit.get_tools()
     prompt_template = hub.pull("langchain-ai/sql-agent-system-prompt")
@@ -226,8 +226,7 @@ def run_case1(user_text, config):
         f"\n{catalog}\n"
     )
 
-    system_msg = base_msg + guard
-    agent = create_react_agent(llm, tools, prompt=system_msg)
+    agent = create_react_agent(llm, tools, prompt=base_msg + guard)
 
     try:
         response = agent.invoke({"messages": [{"role": "user", "content": user_text}]})
@@ -319,8 +318,11 @@ def run_camp_verify(sentence, config):
         try:
             r = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
-                params={"key": config["GOOGLE_API_KEY"], "cx": config["GOOGLE_CSE_ID"],
-                        "q": query, "num": num},
+                params={
+                    "key": config["GOOGLE_API_KEY"],
+                    "cx": config["GOOGLE_CSE_ID"],
+                    "q": query, "num": num
+                },
                 timeout=30
             )
             return r.json().get("items", []) if r.status_code < 400 else []
@@ -368,13 +370,11 @@ def run_camp_verify(sentence, config):
 # MAIN QUERY PROCESSOR
 # ─────────────────────────────────────────────
 def process_query(user_text, config):
-    # Classify
     case = classify_query(user_text, config["GEMINI_API_KEY"])
 
     if case == "BLOCKED" or "violates" in case:
         return "Your content violates our community guidelines, do you have another question?"
 
-    # Route
     if case == "Case1":
         output = run_case1(user_text, config)
         is_valid, result = validate_answer(user_text, output, config["GEMINI_API_KEY"])
@@ -401,7 +401,6 @@ def process_query(user_text, config):
         combined = f"STRUCTURED:\n{output1}\n\nDESCRIPTIVE:\n{output2}"
         final = summarize_answer(user_text, combined, config["GEMINI_API_KEY"])
 
-    # Verify camp names
     try:
         return run_camp_verify(final, config)
     except Exception:
@@ -432,6 +431,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Load config and validate
+config = get_config()
+missing_keys = validate_config(config)
+
 # Sidebar
 with st.sidebar:
     st.header("📋 How to Use")
@@ -442,23 +445,27 @@ with st.sidebar:
     - 👶 **Age and gender** of camper
     - 🏕️ **Day camp or overnight?**
     - 💸 **Your budget**
-    
+
     **Examples:**
     - "STEM camps in Ontario for 12-year-old boys under $500"
     - "Overnight camps in BC for outdoor adventures"
     """)
     st.divider()
 
-    # System status
-    config = get_config()
     with st.expander("🔌 System Status"):
-        st.write("✅ Gemini API" if config.get("GEMINI_API_KEY") else "❌ Gemini API")
-        st.write("✅ Pinecone" if config.get("PINECONE_API_KEY") else "❌ Pinecone")
-        st.write("✅ Database" if config.get("DB_HOST") else "❌ Database")
+        st.write("✅ Gemini API" if config.get("GEMINI_API_KEY") else "❌ Gemini API missing")
+        st.write("✅ Pinecone" if config.get("PINECONE_API_KEY") else "❌ Pinecone missing")
+        st.write("✅ Database" if config.get("DB_HOST") else "❌ Database missing")
+        st.write("✅ Google CSE" if config.get("GOOGLE_API_KEY") else "❌ Google CSE missing")
 
     if st.button("🗑️ Clear Chat"):
         st.session_state.messages = []
         st.rerun()
+
+# Show warning if secrets are missing
+if missing_keys:
+    st.error(f"⚠️ Missing configuration: {', '.join(missing_keys)}. Please check your Streamlit secrets.")
+    st.stop()
 
 # Chat history
 if "messages" not in st.session_state:
@@ -489,8 +496,7 @@ if prompt := st.chat_input("Ask me about camps..."):
     with st.chat_message("assistant"):
         with st.spinner("🔍 Searching for the best camps..."):
             try:
-                cfg = get_config()
-                response = process_query(prompt, cfg)
+                response = process_query(prompt, config)
                 st.markdown(response)
                 st.session_state.messages.append({
                     "role": "assistant",
