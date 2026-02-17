@@ -1,0 +1,50 @@
+# Core
+streamlit==1.31.0
+python-dotenv==1.1.1
+
+# LangChain
+langchain==0.3.27
+langchain-community==0.3.31
+langchain-core==0.3.79
+langchain-google-genai==2.1.12
+langchain-openai==0.3.35
+langchain-pinecone==0.2.12
+langchain-text-splitters==0.3.11
+langsmith==0.4.34
+
+# LangGraph
+langgraph==0.6.10
+langgraph-checkpoint==2.1.2
+langgraph-prebuilt==0.6.4
+langgraph-sdk==0.2.9
+
+# Pinecone
+pinecone==7.3.0
+
+# Database
+SQLAlchemy==2.0.44
+PyMySQL==1.1.2
+
+# Google / Gemini
+google-ai-generativelanguage==0.7.0
+google-api-core==2.26.0
+google-auth==2.41.1
+googleapis-common-protos==1.70.0
+
+# PDF & File Processing
+pypdf==6.1.1
+
+# Data
+pandas==2.2.3
+numpy==2.1.3
+
+# HTTP
+requests==2.32.5
+httpx==0.28.1
+aiohttp==3.11.18
+
+# Utils
+tiktoken==0.12.0
+tenacity==9.1.2
+pydantic==2.8.2
+packaging==24.2
