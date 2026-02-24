@@ -476,7 +476,20 @@ def run_case1(user_text, _config):
                     notes.append(f"Results filtered for age {age_filter}. Check each camp for exact age requirements.")
 
                 note_str = "\n\n💡 " + " ".join(notes) if notes else ""
-                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps) + note_str
+
+                # Detect name for personalized greeting
+                import re as _re
+                name_match = _re.search(r'my name is (\w+)', combined_text.lower())
+                greeting = f"Great news, **{name_match.group(1).title()}**! " if name_match else ""
+
+                activity_label = ", ".join([k for k in specialty_map if k in combined_text.lower()][:2])
+                location_label = region_filter or location_filter or ""
+                if greeting and activity_label and location_label:
+                    intro = f"{greeting}Here are the best **{activity_label}** camps in **{location_label}** for you:\n\n"
+                else:
+                    intro = f"Found {len(camps)} camp(s){summary}:\n"
+
+                return intro + "\n".join(camps) + note_str
 
             # Try 2: Drop cost filter only
             if cost_filter:
@@ -512,10 +525,13 @@ def run_case1(user_text, _config):
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    kw_used = [k for k, c in specialty_map.items() if any(x in specialty_codes for x in c)][:3]
+                    # Only show keywords the user actually typed
+                    user_kws = [k for k in specialty_map if k in combined_text.lower()][:2]
+                    kw_label = " and ".join(user_kws) if user_kws else "that type of"
+                    loc_label = region_filter or location_filter or "that area"
                     return (
-                        f"We don't have any {', '.join(kw_used)} camps listed in {location_filter} yet. "
-                        f"Here are other camps available in {location_filter}:\n" + "\n".join(camps)
+                        f"We don't currently have **{kw_label}** camps listed in **{loc_label}**. "
+                        f"Here are other camps nearby that may interest you:\n" + "\n".join(camps)
                     )
 
             # Try 6: Specialty across Canada — only if no province was specified
