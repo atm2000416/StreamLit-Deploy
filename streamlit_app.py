@@ -96,16 +96,16 @@ def load_client_camps(config):
                         cols_result = conn.execute(text(f"SHOW COLUMNS FROM `{table}`"))
                         cols = {row[0].lower(): row[0] for row in cols_result.fetchall()}
                         
-                        name_col = cols.get('name') or cols.get('camp_name') or cols.get('title')
-                        url_col = cols.get('url') or cols.get('website') or cols.get('link')
+                        name_col = cols.get('camp_name') or cols.get('name') or cols.get('title')
+                        url_col = cols.get('prettyurl') or cols.get('filename') or cols.get('url') or cols.get('website')
                         location_col = cols.get('location') or cols.get('region') or cols.get('province')
-                        type_col = cols.get('type') or cols.get('category') or cols.get('camp_type')
+                        type_col = cols.get('elistingtype') or cols.get('listingclass') or cols.get('type') or cols.get('category')
                         price_col = cols.get('price') or cols.get('cost') or cols.get('fee')
                         age_min_col = cols.get('age_min') or cols.get('min_age')
                         age_max_col = cols.get('age_max') or cols.get('max_age')
-                        day_col = cols.get('day_overnight') or cols.get('camp_style')
+                        day_col = cols.get('listingclass') or cols.get('day_overnight') or cols.get('camp_style')
                         desc_col = cols.get('description') or cols.get('details')
-                        id_col = cols.get('id') or cols.get('camp_id')
+                        id_col = cols.get('cid') or cols.get('id') or cols.get('camp_id')
                         
                         if not name_col:
                             continue
@@ -233,7 +233,7 @@ def run_case1(user_text, _config):
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=_config["GEMINI_API_KEY"])
     
     db = SQLDatabase.from_uri(
-        get_db_uri(_config, _config["DB_CAMPDB"]),
+        get_db_uri(_config, _config["DB_CAMP_DIR"]),
         view_support=True,
         sample_rows_in_table_info=2
     )
