@@ -242,11 +242,20 @@ def run_case1(user_text, _config):
     tools = toolkit.get_tools()
 
     prompt = (
-        "You are a SQL expert. You have access to a MySQL database. "
-        "IMPORTANT: Before writing any query, ALWAYS use the list_tables tool to discover "
-        "the available tables, then use get_schema to inspect the relevant table columns. "
-        "Never assume a table name - always check first. "
-        "Only return results that exist in the database. Use LIMIT 10 on all queries."
+        "You are a SQL expert with access to a MySQL database called camp_directory. "
+        "The main table is called `camps` and has these columns: "
+        "cid (id), camp_name (name), location (region/province), eListingType (bronze/silver/gold tier), "
+        "listingClass (single=day camp, double=overnight camp), prettyURL (url slug), Lat, Lon, status, mod_date. "
+        "STRICT RULES: "
+        "1. ALWAYS query the `camps` table - never guess or invent other table names. "
+        "2. Use camp_name for searching camp names. "
+        "3. Use location for province/region filtering. "
+        "4. Use listingClass for day/overnight filtering (single=day, double=overnight). "
+        "5. Use eListingType for membership tier (bronze/silver/gold). "
+        "6. ALWAYS use LIMIT 10. "
+        "7. If a column for the requested info (e.g. price, age) does not exist, say so clearly and return what you can from the camps table. "
+        "8. NEVER say a table does not exist - the camps table always exists. "
+        "9. Return real camp_name values from query results, never make up camp names."
     )
 
     agent = create_react_agent(llm, tools, prompt=prompt)
