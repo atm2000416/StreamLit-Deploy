@@ -221,50 +221,90 @@ def classify_query(user_text):
 # ═════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def run_case1(user_text, _config):
-    """Query database using direct Gemini API for SQL generation + SQLAlchemy for execution"""
+    """Query camps database using keyword extraction + hardcoded SQL templates"""
     from sqlalchemy import create_engine, text
 
-    # Very explicit prompt — trick is to frame it as a translation task, not a DB task
-    system_prompt = (
-        "You are a SQL translator. Your only job is to translate natural language into MySQL syntax. "
-        "You are NOT connected to any database. You do NOT check if tables exist. "
-        "You simply translate the user request into a MySQL SELECT statement using the schema below. "
-        "Always output ONLY the raw SQL — no markdown, no backticks, no explanation, no apology, no commentary. "
-        "If the user asks about columns that do not exist in the schema (e.g. price, age), just omit those filters and query what is available."
-    )
+    # Extract filters from user text — no LLM needed for SQL generation
+    text_lower = user_text.lower()
 
-    user_prompt = (
-        f"Translate this into a MySQL SELECT query using only this schema:\n"
-        f"Table name: camps\n"
-        f"Columns: cid, camp_name, location, eListingType (bronze/silver/gold), "
-        f"listingClass (single=day camp / double=overnight), prettyURL, Lat, Lon, status\n"
-        f"Rules: Use LIKE for text matches. Always add LIMIT 10. SELECT camp_name, location, listingClass, eListingType, prettyURL.\n\n"
-        f"Request: {user_text}\n\n"
-        f"SQL:"
-    )
+    # Location filter
+    provinces = {
+        'ontario': 'Ontario', 'quebec': 'Quebec', 'bc': 'BC',
+        'british columbia': 'BC', 'alberta': 'Alberta',
+        'nova scotia': 'Nova Scotia', 'new brunswick': 'New Brunswick',
+        'manitoba': 'Manitoba', 'saskatchewan': 'Saskatchewan'
+    }
+    location_filter = None
+    for keyword, value in provinces.items():
+        if keyword in text_lower:
+            location_filter = value
+            break
+
+    # Day/overnight filter
+    style_filter = None
+    if 'overnight' in text_lower or 'sleepaway' in text_lower or 'sleep away' in text_lower:
+        style_filter = 'double'
+    elif 'day camp' in text_lower or 'day camp' in text_lower:
+        style_filter = 'single'
+
+    # Tier filter
+    tier_filter = None
+    for tier in ['gold', 'silver', 'bronze']:
+        if tier in text_lower:
+            tier_filter = tier
+            break
+
+    # Camp name keyword search
+    name_keywords = []
+    for word in ['stem', 'science', 'sports', 'arts', 'music', 'hockey', 'soccer',
+                 'basketball', 'tech', 'coding', 'robotics', 'dance', 'theatre',
+                 'adventure', 'outdoor', 'equestrian', 'riding', 'sailing', 'tennis',
+                 'golf', 'leadership', 'french', 'language', 'math']:
+        if word in text_lower:
+            name_keywords.append(word)
+
+    # Build SQL query dynamically
+    conditions = ["status = 1"]
+    params = {}
+
+    if location_filter:
+        conditions.append("location LIKE :location")
+        params['location'] = f"%{location_filter}%"
+
+    if style_filter:
+        conditions.append("listingClass = :style")
+        params['style'] = style_filter
+
+    if tier_filter:
+        conditions.append("eListingType = :tier")
+        params['tier'] = tier_filter
+
+    if name_keywords:
+        name_conditions = " OR ".join([f"camp_name LIKE :kw{i}" for i, _ in enumerate(name_keywords)])
+        conditions.append(f"({name_conditions})")
+        for i, kw in enumerate(name_keywords):
+            params[f'kw{i}'] = f"%{kw}%"
+
+    where_clause = " AND ".join(conditions)
+    sql_query = f"SELECT camp_name, location, listingClass, eListingType, prettyURL FROM camps WHERE {where_clause} LIMIT 10"
 
     try:
-        sql_query = call_gemini(system_prompt, user_prompt, _config["GEMINI_API_KEY"], max_tokens=256)
-
-        if not sql_query:
-            return "Could not generate a query for your request."
-
-        # Strip any markdown wrapping
-        sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
-
-        # Safety check — make sure it starts with SELECT
-        if not sql_query.upper().startswith("SELECT"):
-            return f"Unexpected model response: {sql_query[:200]}"
-
-        # Execute directly with SQLAlchemy
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
-            result = conn.execute(text(sql_query))
+            result = conn.execute(text(sql_query), params)
             rows = result.fetchall()
             col_names = list(result.keys())
 
             if not rows:
-                return "No camps found matching your criteria in our database."
+                # Fallback — return top 10 active camps if no filters matched
+                fallback = conn.execute(text(
+                    "SELECT camp_name, location, listingClass, eListingType, prettyURL "
+                    "FROM camps WHERE status = 1 ORDER BY eListingType DESC LIMIT 10"
+                ))
+                rows = fallback.fetchall()
+                col_names = list(fallback.keys())
+                if not rows:
+                    return "No camps found in our database."
 
             camp_list = []
             for row in rows:
@@ -275,7 +315,14 @@ def run_case1(user_text, _config):
                 tier = row_dict.get("eListingType", "")
                 camp_list.append(f"- {name} ({style}, {location}) [{tier}]")
 
-            return f"Found {len(rows)} camp(s):\n" + "\n".join(camp_list)
+            filters_used = []
+            if location_filter: filters_used.append(f"location: {location_filter}")
+            if style_filter: filters_used.append("overnight" if style_filter == "double" else "day camp")
+            if tier_filter: filters_used.append(f"tier: {tier_filter}")
+            if name_keywords: filters_used.append(f"keywords: {', '.join(name_keywords)}")
+            filter_summary = f" (filters: {', '.join(filters_used)})" if filters_used else ""
+
+            return f"Found {len(rows)} camp(s){filter_summary}:\n" + "\n".join(camp_list)
 
     except Exception as e:
         return f"Database query error: {str(e)[:300]}"
