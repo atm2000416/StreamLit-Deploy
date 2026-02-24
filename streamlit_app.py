@@ -234,6 +234,7 @@ def run_case1(user_text, _config):
     
     db = SQLDatabase.from_uri(
         get_db_uri(_config, _config["DB_CAMP_DIR"]),
+        include_tables=["camps"],
         view_support=True,
         sample_rows_in_table_info=2
     )
