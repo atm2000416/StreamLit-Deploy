@@ -216,26 +216,92 @@ def classify_query(user_text):
 # CASE 1: SQL AGENT
 # ═════════════════════════════════════════════
 def run_case1(user_text, _config):
-    """Query camps using proper JOINs with mapping table for province and category filtering"""
+    """Query camps using sessions table with specialty codes and proper province/age/cost filtering"""
     from sqlalchemy import create_engine, text
 
     text_lower = user_text.lower()
 
-    # Province filter — must match exact values in mapping.grouping column
+    # Specialty code mapping based on actual sessions data
+    specialty_map = {
+        'stem': [268, 18, 50, 67, 160, 180],
+        'science': [268, 50, 18],
+        'technology': [268, 18, 180],
+        'coding': [18, 180, 268],
+        'robotics': [67, 268, 160],
+        'computer': [18, 180, 268],
+        'engineering': [160, 268, 50],
+        'math': [129, 268, 18],
+        'arts': [9, 172],
+        'art': [9, 172],
+        'music': [37],
+        'guitar': [37],
+        'dance': [22],
+        'theatre': [172],
+        'drama': [172],
+        'film': [172],
+        'soccer': [54],
+        'basketball': [12],
+        'tennis': [66],
+        'racquet': [66],
+        'equestrian': [30],
+        'riding': [30],
+        'horse': [30],
+        'cooking': [133],
+        'chef': [133],
+        'aerospace': [50],
+        'leadership': [79, 181],
+        'outdoor': [181, 79],
+        'adventure': [181, 79],
+        'hockey': [188],
+        'fitness': [188],
+        'sports': [188, 12, 54, 66],
+        'french': [314],
+        'language': [314],
+        'academic': [314, 129],
+    }
+
+    # Province filter
     provinces = {
         'british columbia': 'British Columbia', 'bc': 'British Columbia',
         'ontario': 'Ontario', 'quebec': 'Quebec', 'alberta': 'Alberta',
         'nova scotia': 'Nova Scotia', 'new brunswick': 'New Brunswick',
         'manitoba': 'Manitoba', 'saskatchewan': 'Saskatchewan',
-        'newfoundland': 'Newfoundland and Labrador', 'pei': 'Prince Edward Island',
-        'prince edward island': 'Prince Edward Island', 'yukon': 'Yukon',
-        'northwest territories': 'Northwest Territories', 'nunavut': 'Nunavut'
+        'newfoundland': 'Newfoundland and Labrador',
+        'prince edward island': 'Prince Edward Island', 'pei': 'Prince Edward Island',
+        'yukon': 'Yukon', 'northwest territories': 'Northwest Territories',
+        'nunavut': 'Nunavut'
     }
     location_filter = None
     for keyword, value in provinces.items():
         if keyword in text_lower:
             location_filter = value
             break
+
+    # Specialty codes from keywords
+    specialty_codes = []
+    for keyword, codes in specialty_map.items():
+        if keyword in text_lower:
+            specialty_codes.extend(codes)
+    specialty_codes = list(set(specialty_codes))
+
+    # Age filter
+    age_filter = None
+    import re
+    age_match = re.search(r'(\d+)\s*(?:year|yr|yo|-year)', text_lower)
+    if age_match:
+        age_filter = int(age_match.group(1))
+    elif 'teenager' in text_lower or 'teen' in text_lower:
+        age_filter = 14
+    elif 'toddler' in text_lower:
+        age_filter = 4
+    elif 'child' in text_lower or 'kid' in text_lower:
+        age_filter = 8
+
+    # Cost filter
+    cost_filter = None
+    cost_match = re.search(r'\$?\s*(\d+)', text_lower)
+    if cost_match and any(w in text_lower for w in ['under', 'below', 'less than', 'budget', 'about', 'around']):
+        cost_filter = int(cost_match.group(1))
 
     # Day/overnight filter
     style_filter = None
@@ -244,112 +310,152 @@ def run_case1(user_text, _config):
     elif 'day camp' in text_lower:
         style_filter = 'single'
 
-    # Tier filter
-    tier_filter = None
-    for tier in ['gold', 'silver', 'bronze']:
-        if tier in text_lower:
-            tier_filter = tier
-            break
+    def build_query(province, codes, age, cost, style, limit=10):
+        conditions = ["c.status = 1", "s.specialty != 0"]
+        params = {}
 
-    # Camp name keyword search — used when no category match
-    name_keywords = []
-    for word in ['stem', 'science', 'technology', 'computer', 'sports', 'arts', 'music',
-                 'hockey', 'soccer', 'basketball', 'tech', 'coding', 'robotics', 'dance',
-                 'theatre', 'adventure', 'outdoor', 'equestrian', 'riding', 'sailing',
-                 'tennis', 'golf', 'leadership', 'french', 'language', 'math', 'drama',
-                 'film', 'nature', 'wilderness', 'canoe', 'swim', 'gymnastics']:
-        if word in text_lower:
-            name_keywords.append(word)
+        if codes:
+            placeholders = ", ".join([f":sc{i}" for i, _ in enumerate(codes)])
+            conditions.append(f"(s.specialty IN ({placeholders}) OR s.specialty2 IN ({placeholders}))")
+            for i, code in enumerate(codes):
+                params[f'sc{i}'] = code
 
-    # Build SQL with proper JOIN to mapping table for province filtering
-    params = {}
-    conditions = ["c.status = 1"]
+        if age:
+            conditions.append("s.age_from <= :age AND s.age_to >= :age")
+            params['age'] = age
 
-    if location_filter:
-        conditions.append("m.`grouping` = :province")
-        params['province'] = location_filter
+        if cost:
+            conditions.append("s.cost_from <= :cost")
+            params['cost'] = cost
 
-    if style_filter:
-        conditions.append("c.listingClass = :style")
-        params['style'] = style_filter
+        if style:
+            conditions.append("c.listingClass = :style")
+            params['style'] = style
 
-    if tier_filter:
-        conditions.append("c.eListingType = :tier")
-        params['tier'] = tier_filter
+        if province:
+            conditions.append("m.`grouping` = :province")
+            params['province'] = province
+            from_clause = """camp_directory.camps c
+                JOIN camp_directory.sessions s ON s.cid = c.cid
+                JOIN camp_directory.extra_locations el ON el.cid = c.cid
+                JOIN common_update.mapping m ON m.mid = el.locations"""
+        else:
+            from_clause = """camp_directory.camps c
+                JOIN camp_directory.sessions s ON s.cid = c.cid"""
 
-    if name_keywords:
-        kw_conditions = " OR ".join([f"c.camp_name LIKE :kw{i}" for i, _ in enumerate(name_keywords)])
-        conditions.append(f"({kw_conditions})")
-        for i, kw in enumerate(name_keywords):
-            params[f'kw{i}'] = f"%{kw}%"
+        where = " AND ".join(conditions)
+        sql = f"""SELECT DISTINCT c.cid, c.camp_name, c.listingClass, c.eListingType, c.prettyURL,
+                s.age_from, s.age_to, s.cost_from, s.cost_to,
+                {'m.p_region, m.`grouping` as province' if province else 'NULL as p_region, NULL as province'}
+            FROM {from_clause}
+            WHERE {where}
+            ORDER BY c.eListingType DESC
+            LIMIT {limit}"""
+        return sql, params
 
-    where_clause = " AND ".join(conditions)
-
-    if location_filter:
-        sql_query = f"""SELECT c.cid, c.camp_name, m.p_region, m.`grouping` as province,
-            c.listingClass, c.eListingType, c.prettyURL
-            FROM camps c
-            JOIN mapping m ON c.location = m.mid
-            WHERE {where_clause}
-            GROUP BY c.cid
-            LIMIT 10"""
-    else:
-        sql_query = f"""SELECT c.cid, c.camp_name, c.location,
-            c.listingClass, c.eListingType, c.prettyURL
-            FROM camps c
-            WHERE {where_clause}
-            LIMIT 10"""
-
-    fallback_sql = """SELECT c.cid, c.camp_name, c.listingClass, c.eListingType, c.prettyURL
-        FROM camps c
-        WHERE c.status = 1
-        ORDER BY c.eListingType DESC
-        LIMIT 10"""
+    def format_rows(rows, col_names):
+        camp_list = []
+        seen = set()
+        for row in rows:
+            d = dict(zip(col_names, row))
+            name = d.get("camp_name", "Unknown")
+            if name in seen:
+                continue
+            seen.add(name)
+            province = d.get("province") or ""
+            region = d.get("p_region") or ""
+            location_str = f"{region}, {province}".strip(", ") if (region or province) else "N/A"
+            style = "Day Camp" if d.get("listingClass") == "single" else "Overnight Camp"
+            tier = d.get("eListingType", "")
+            pretty_url = d.get("prettyURL", "")
+            cid = d.get("cid", "")
+            age_from = d.get("age_from", "")
+            age_to = d.get("age_to", "")
+            cost_from = d.get("cost_from", "")
+            cost_to = d.get("cost_to", "")
+            age_str = f"Ages {age_from}-{age_to}" if age_from and age_to else ""
+            cost_str = f"${cost_from}-${cost_to}/wk" if cost_from and cost_to else (f"${cost_from}" if cost_from else "")
+            details = " | ".join(filter(None, [age_str, cost_str]))
+            if pretty_url and cid:
+                full_url = f"https://www.camps.ca/{pretty_url}/{cid}"
+                camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}]({full_url})) — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
+            else:
+                camp_list.append(f"- **{name}** — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
+        return camp_list
 
     try:
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
-            result = conn.execute(text(sql_query), params)
+
+            # Try 1: Full search
+            sql, params = build_query(location_filter, specialty_codes, age_filter, cost_filter, style_filter)
+            result = conn.execute(text(sql), params)
             rows = result.fetchall()
             col_names = list(result.keys())
 
-            if not rows:
-                result = conn.execute(text(fallback_sql))
+            if rows:
+                camp_list = format_rows(rows, col_names)
+                filters = []
+                if location_filter: filters.append(location_filter)
+                if specialty_codes: filters.append(", ".join([k for k in specialty_map if any(c in specialty_codes for c in specialty_map[k])][:3]))
+                if age_filter: filters.append(f"age {age_filter}")
+                if cost_filter: filters.append(f"under ${cost_filter}")
+                summary = f" (filters: {', '.join(filters)})" if filters else ""
+                return f"Found {len(camp_list)} camp(s){summary}:\n" + "\n".join(camp_list)
+
+            # Try 2: Drop cost filter
+            if cost_filter:
+                sql, params = build_query(location_filter, specialty_codes, age_filter, None, style_filter)
+                result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 col_names = list(result.keys())
-                if not rows:
-                    return "No camps found in our database."
+                if rows:
+                    camp_list = format_rows(rows, col_names)
+                    return f"No camps found under ${cost_filter} — here are the closest matches:\n" + "\n".join(camp_list)
 
-            camp_list = []
-            for row in rows:
-                row_dict = dict(zip(col_names, row))
-                name = row_dict.get("camp_name", "Unknown")
-                province = row_dict.get("province") or row_dict.get("grouping", "")
-                region = row_dict.get("p_region", "")
-                location_str = f"{region}, {province}" if region and province else province or region or "N/A"
-                style = "Day Camp" if row_dict.get("listingClass") == "single" else "Overnight Camp"
-                tier = row_dict.get("eListingType", "")
-                pretty_url = row_dict.get("prettyURL", "")
-                cid = row_dict.get("cid", "")
+            # Try 3: Drop age + cost, keep specialty + province
+            if age_filter or cost_filter:
+                sql, params = build_query(location_filter, specialty_codes, None, None, style_filter)
+                result = conn.execute(text(sql), params)
+                rows = result.fetchall()
+                col_names = list(result.keys())
+                if rows:
+                    camp_list = format_rows(rows, col_names)
+                    return f"Here are matching camps in {location_filter or 'Canada'}:\n" + "\n".join(camp_list)
 
-                if pretty_url and cid:
-                    full_url = f"https://www.camps.ca/{pretty_url}/{cid}"
-                    camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}]({full_url})) — {style}, {location_str} [{tier}]")
-                else:
-                    camp_list.append(f"- **{name}** — {style}, {location_str} [{tier}]")
+            # Try 4: Province only, no specialty
+            if specialty_codes and location_filter:
+                sql, params = build_query(location_filter, [], None, None, style_filter)
+                result = conn.execute(text(sql), params)
+                rows = result.fetchall()
+                col_names = list(result.keys())
+                if rows:
+                    camp_list = format_rows(rows, col_names)
+                    return f"No exact specialty match found in {location_filter} — here are other camps in {location_filter}:\n" + "\n".join(camp_list)
 
-            filters_used = []
-            if location_filter: filters_used.append(f"province: {location_filter}")
-            if style_filter: filters_used.append("overnight" if style_filter == "double" else "day camp")
-            if tier_filter: filters_used.append(f"tier: {tier_filter}")
-            if name_keywords: filters_used.append(f"keywords: {', '.join(name_keywords)}")
-            filter_summary = f" (filters: {', '.join(filters_used)})" if filters_used else ""
+            # Try 5: Specialty across all Canada, no province
+            if specialty_codes and location_filter:
+                sql, params = build_query(None, specialty_codes, age_filter, None, style_filter)
+                result = conn.execute(text(sql), params)
+                rows = result.fetchall()
+                col_names = list(result.keys())
+                if rows:
+                    camp_list = format_rows(rows, col_names)
+                    return f"No matching camps found in {location_filter} — here are similar camps across Canada:\n" + "\n".join(camp_list)
 
-            return f"Found {len(rows)} camp(s){filter_summary}:\n" + "\n".join(camp_list)
+            # Try 6: Top camps overall
+            sql, params = build_query(None, [], None, None, None)
+            result = conn.execute(text(sql), params)
+            rows = result.fetchall()
+            col_names = list(result.keys())
+            if rows:
+                camp_list = format_rows(rows, col_names)
+                return f"Here are our top member camps:\n" + "\n".join(camp_list)
+
+            return "No camps found in our database."
 
     except Exception as e:
-        sql_info = sql_query if "sql_query" in locals() else "SQL not generated"
-        return f"Database query error: {str(e)[:500]}\n\nSQL attempted: {sql_info}"
+        return f"Database query error: {str(e)[:500]}"
 
 # ═════════════════════════════════════════════
 # CASE 2: VECTOR SEARCH
