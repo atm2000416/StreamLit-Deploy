@@ -443,7 +443,40 @@ def run_case1(user_text, _config):
                     f"under ${cost_filter}" if cost_filter else None,
                 ]))
                 summary = f" (filters: {', '.join(filters)})" if filters else ""
-                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps)
+
+                # Smart contextual notes
+                notes = []
+
+                # Check if style filter was requested but all results already match
+                if style_filter == 'single':
+                    all_day = all('Day Camp' in c for c in camps)
+                    if all_day:
+                        notes.append("All results are day camps.")
+                elif style_filter == 'double':
+                    all_overnight = all('Overnight Camp' in c for c in camps)
+                    if all_overnight:
+                        notes.append("All results are overnight camps.")
+
+                # Note if results span multiple provinces when one was requested
+                if location_filter:
+                    other_provinces = [c for c in camps if location_filter not in c]
+                    if other_provinces:
+                        notes.append(f"Some results may be outside {location_filter}.")
+
+                # Note if cost range exceeds requested budget
+                if cost_filter:
+                    over_budget = [c for c in camps if f"${cost_filter}" not in c and any(
+                        f"${x}" in c for x in range(cost_filter+1, cost_filter+2000, 50)
+                    )]
+                    if over_budget:
+                        notes.append(f"Some camps may exceed your ${cost_filter} budget — check individual listings for exact pricing.")
+
+                # Age range note
+                if age_filter:
+                    notes.append(f"Results filtered for age {age_filter}. Check each camp for exact age requirements.")
+
+                note_str = "\n\n💡 " + " ".join(notes) if notes else ""
+                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps) + note_str
 
             # Try 2: Drop cost filter only
             if cost_filter:
@@ -452,7 +485,7 @@ def run_case1(user_text, _config):
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"No camps found under ${cost_filter} — here are the closest matches:\n" + "\n".join(camps)
+                    return f"No camps found under ${cost_filter}/week — here are the closest matches (you may want to check for early bird discounts or bursaries):\n" + "\n".join(camps)
 
             # Try 3: Drop age + cost, keep province + specialty
             if age_filter or cost_filter:
@@ -461,7 +494,7 @@ def run_case1(user_text, _config):
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"Here are matching camps in {region_filter or location_filter or 'Canada'}:\n" + "\n".join(camps)
+                    return f"Here are matching camps in {region_filter or location_filter or 'Canada'} (age/cost filters relaxed to show more options):\n" + "\n".join(camps)
 
             # Try 4: Drop region, keep province + specialty
             if region_filter:
@@ -470,7 +503,7 @@ def run_case1(user_text, _config):
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"No camps found near {region_filter} — here are matches elsewhere in {location_filter}:\n" + "\n".join(camps)
+                    return f"No camps found near {region_filter} — here are matches elsewhere in {location_filter} that may be worth the trip:\n" + "\n".join(camps)
 
             # Try 5: Province only — drop specialty, keep location
             if specialty_codes and location_filter:
@@ -492,7 +525,7 @@ def run_case1(user_text, _config):
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"Here are matching camps across Canada:\n" + "\n".join(camps)
+                    return f"Here are matching camps across Canada — consider contacting them about virtual or travel options:\n" + "\n".join(camps)
 
             # Try 7: Top camps overall — last resort
             result = conn.execute(text(
@@ -706,17 +739,25 @@ def process_query(user_text, config, client_camps, chat_history=None):
     """Main query processing pipeline"""
     start_time = time.time()
 
-    # Combine context from recent messages
-    # For short follow-up messages (< 5 words), include more history
-    # For longer messages, use only the last user message to avoid keyword bleed
-    word_count = len(user_text.split())
+    # Detect refinement follow-ups vs new queries
+    refinement_phrases = [
+        'from this list', 'from those', 'of those', 'of these',
+        'day camps only', 'overnight only', 'just day', 'just overnight',
+        'under $', 'below $', 'cheaper', 'more affordable',
+        'show more', 'what about', 'any others', 'instead',
+        'closer to', 'near', 'in that area', 'same area',
+        'for my', 'for a', 'ages', 'year old',
+    ]
+    text_lower_check = user_text.lower()
+    is_refinement = any(phrase in text_lower_check for phrase in refinement_phrases)
+
     if chat_history:
-        if word_count <= 5:
-            # Short follow-up like "day camps only" or "under $500" — use last 4 messages
+        if is_refinement:
+            # Refinement — carry last 4 user messages for full context
             recent_user_msgs = [m["content"] for m in chat_history[-4:] if m["role"] == "user"]
         else:
-            # Longer query — use only last 1 message to avoid bleed
-            recent_user_msgs = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
+            # New query — use only last 1 previous message to avoid keyword bleed
+            recent_user_msgs = [m["content"] for m in chat_history[-1:] if m["role"] == "user"]
         combined_text = " ".join(recent_user_msgs + [user_text])
     else:
         combined_text = user_text
@@ -745,10 +786,14 @@ st.markdown("""
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         border-radius: 1rem; margin-bottom: 2rem; color: white;
     }
+    .consultant-form {
+        background: #f8f9fa; border-radius: 1rem;
+        padding: 1.5rem; margin-bottom: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="camp-header"><h1>🏕️ Camp Discovery</h1><p>Verified Member Camps</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="camp-header"><h1>🏕️ Camp Discovery</h1><p>Your Personal Canadian Camp Consultant</p></div>', unsafe_allow_html=True)
 
 config = get_config()
 required = ["GEMINI_API_KEY", "PINECONE_API_KEY", "DB_HOST", "DB_USER", "DB_PASS", "INDEX_HOST"]
@@ -761,49 +806,141 @@ if missing:
 with st.spinner("Loading member camps..."):
     client_camps = load_client_camps(config)
 
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("📋 Search Our Members")
-    st.markdown("All results include verified links to **camps.ca** or **ourkids.net**")
+    st.header("🏕️ Camp Consultant")
+    st.markdown("Tell us about yourself and we'll find the perfect camp!")
     st.divider()
-    
-    with st.expander("📊 Database Stats"):
+
+    # Consultation intake form
+    with st.form("consultation_form"):
+        st.subheader("👤 About You")
+        contact_name = st.text_input("Your name", placeholder="e.g. Sarah")
+        region_camp  = st.text_input("Your region / city", placeholder="e.g. Toronto, Ottawa, Vancouver")
+        st.subheader("🏕️ Camp Preferences")
+        category_options = ["Any", "STEM / Science / Technology", "Sports", "Arts / Music / Dance",
+                            "Outdoor / Adventure", "Academic / Tutoring", "Language / French",
+                            "Equestrian / Riding", "Cooking / Chef", "Leadership", "Traditional"]
+        category_camp = st.selectbox("Type of camp", category_options)
+        camp_type     = st.text_input("Specific activity", placeholder="e.g. robotics, hockey, painting")
+        date_camp     = st.text_input("Preferred dates / season", placeholder="e.g. July, Summer 2025, Week of Aug 4")
+        costs_camp    = st.text_input("Max budget per week", placeholder="e.g. $500, $800")
+        age_child     = st.text_input("Child's age(s)", placeholder="e.g. 10, 8 and 12")
+        overnight     = st.radio("Camp style", ["Either", "Day camp", "Overnight camp"])
+        submitted     = st.form_submit_button("🔍 Find My Camp!", use_container_width=True)
+
+    st.divider()
+    with st.expander("📊 Network Stats"):
         st.metric("Member Camps", f"{len(client_camps):,}")
-        st.caption("✅ Only paying clients shown")
+        st.caption("✅ Verified member camps only")
         st.caption("🔗 All camps have verified URLs")
-    
-    if st.button("🗑️ Clear Chat"):
+
+    if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.consultation_done = False
         st.rerun()
 
+# ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "consultation_done" not in st.session_state:
+    st.session_state.consultation_done = False
+
+# ── Handle consultation form submission ───────────────────────────────────────
+if submitted and contact_name and region_camp:
+    # Build a rich structured query from the form
+    style_text = "" if overnight == "Either" else overnight.lower()
+    budget_text = f"under {costs_camp} per week" if costs_camp else ""
+    age_text    = f"for a {age_child}-year-old" if age_child else ""
+    type_text   = camp_type if camp_type else category_camp if category_camp != "Any" else "general"
+    date_text   = f"around {date_camp}" if date_camp else "this summer"
+
+    structured_query = (
+        f"My name is {contact_name} and I'm looking for {style_text} {type_text} camps "
+        f"in {region_camp} {age_text} {budget_text} {date_text}."
+    ).replace("  ", " ").strip()
+
+    welcome = (
+        f"Hi {contact_name}! 👋 Great to meet you! I'm your personal camp consultant and "
+        f"I'll find the best camps for you in **{region_camp}**.\n\n"
+        f"Let me search our verified member network now... 🔍"
+    )
+
+    st.session_state.messages = [{"role": "assistant", "content": welcome}]
+    st.session_state.messages.append({"role": "user", "content": structured_query})
+    st.session_state.consultation_done = False
+    st.rerun()
+
+# ── Welcome message if no messages yet ───────────────────────────────────────
+if not st.session_state.messages:
     st.session_state.messages = [{
         "role": "assistant",
         "content": (
-            "Hi! 🏕️ I'll help you find camps from our **verified member network**.\n\n"
-            "💡 *All results include verified links to camps.ca or ourkids.net*\n\n"
-            "**Example format:**\n"
-            "**Camp Sunshine** ([camps.ca/camp-sunshine](https://camps.ca/camp-sunshine))\n\n"
-            "Try: *Show me STEM camps in Ontario for 12-year-olds under $500*"
+            "👋 Welcome to Camp Discovery! I'm your personal Canadian camp consultant.\n\n"
+            "**To get started**, fill in the form on the left and I'll find the perfect camp for you! "
+            "Or just type your search below.\n\n"
+            "💡 *Try: 'Show me STEM camps in Toronto for a 12-year-old under $500'*"
         )
     }]
 
+# ── Display chat history ──────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Search member camps..."):
+# ── Process any pending user message ─────────────────────────────────────────
+last_msg = st.session_state.messages[-1] if st.session_state.messages else None
+if last_msg and last_msg["role"] == "user" and not st.session_state.consultation_done:
+    with st.chat_message("assistant"):
+        with st.spinner("Searching member camps..."):
+            try:
+                response, elapsed = process_query(
+                    last_msg["content"], config, client_camps,
+                    chat_history=st.session_state.messages
+                )
+
+                # Append follow-up prompt after first consultation result
+                follow_up = (
+                    "\n\n---\n"
+                    "🎯 **Now that you have your initial recommendations**, is there anything specific "
+                    "that matters most to you? For example:\n"
+                    "- A **different type** of camp activity\n"
+                    "- A **different region** or closer location\n"
+                    "- A specific **budget** range\n"
+                    "- A specific **age group** or dates\n\n"
+                    "Just let me know and I'll refine your results!"
+                )
+
+                full_response = response + follow_up
+                st.markdown(full_response)
+                st.caption(f"⚡ {elapsed:.1f}s • Verified member camps")
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+                st.session_state.consultation_done = True
+
+            except Exception as e:
+                error = f"❌ Error: {str(e)[:300]}"
+                st.error(error)
+                st.session_state.messages.append({"role": "assistant", "content": error})
+                st.session_state.consultation_done = True
+
+# ── Free-text chat input ──────────────────────────────────────────────────────
+if prompt := st.chat_input("Refine your search or ask a follow-up question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.consultation_done = False
     with st.chat_message("user"):
         st.markdown(prompt)
-    
+
     with st.chat_message("assistant"):
-        try:
-            response, elapsed = process_query(prompt, config, client_camps, chat_history=st.session_state.messages)
-            st.markdown(response)
-            if elapsed < 3:
-                st.caption(f"⚡ {elapsed:.1f}s • Member camps only")
-            st.session_state.messages.append({"role": "assistant", "content": response})
-        except Exception as e:
-            error = f"❌ Error: {str(e)[:300]}"
-            st.error(error)
-            st.session_state.messages.append({"role": "assistant", "content": error})
+        with st.spinner("Searching..."):
+            try:
+                response, elapsed = process_query(
+                    prompt, config, client_camps,
+                    chat_history=st.session_state.messages
+                )
+                st.markdown(response)
+                st.caption(f"⚡ {elapsed:.1f}s • Verified member camps")
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                error = f"❌ Error: {str(e)[:300]}"
+                st.error(error)
+                st.session_state.messages.append({"role": "assistant", "content": error})
