@@ -445,15 +445,15 @@ def run_case1(user_text, _config):
                 summary = f" (filters: {', '.join(filters)})" if filters else ""
                 return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps)
 
-            # Try 2: Drop cost
+            # Try 2: Drop cost filter only
             if cost_filter:
                 result = conn.execute(text(*build_query(location_filter, region_filter, specialty_codes, age_filter, None, style_filter)))
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"No camps found under ${cost_filter} — closest matches:\n" + "\n".join(camps)
+                    return f"No camps found under ${cost_filter} — here are the closest matches:\n" + "\n".join(camps)
 
-            # Try 3: Drop age + cost
+            # Try 3: Drop age + cost, keep province + specialty
             if age_filter or cost_filter:
                 result = conn.execute(text(*build_query(location_filter, region_filter, specialty_codes, None, None, style_filter)))
                 rows = result.fetchall()
@@ -467,17 +467,29 @@ def run_case1(user_text, _config):
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"No camps found near {region_filter} — here are matches in {location_filter}:\n" + "\n".join(camps)
+                    return f"No camps found near {region_filter} — here are matches elsewhere in {location_filter}:\n" + "\n".join(camps)
 
-            # Try 5: Specialty across Canada, drop province
+            # Try 5: Province only — drop specialty, keep location
             if specialty_codes and location_filter:
+                result = conn.execute(text(*build_query(location_filter, None, [], None, None, style_filter)))
+                rows = result.fetchall()
+                if rows:
+                    camps = format_rows(rows, list(result.keys()))
+                    kw_used = [k for k, c in specialty_map.items() if any(x in specialty_codes for x in c)][:3]
+                    return (
+                        f"We don't have any {', '.join(kw_used)} camps listed in {location_filter} yet. "
+                        f"Here are other camps available in {location_filter}:\n" + "\n".join(camps)
+                    )
+
+            # Try 6: Specialty across Canada — only if no province was specified
+            if specialty_codes and not location_filter:
                 result = conn.execute(text(*build_query(None, None, specialty_codes, age_filter, None, style_filter)))
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
-                    return f"No matching camps in {location_filter} — here are similar camps across Canada:\n" + "\n".join(camps)
+                    return f"Here are matching camps across Canada:\n" + "\n".join(camps)
 
-            # Try 6: Top camps overall
+            # Try 7: Top camps overall — last resort
             result = conn.execute(text(
                 "SELECT DISTINCT cid, camp_name, province, p_region, listingClass, eListingType, prettyURL, "
                 "age_min, age_max, cost_min, cost_max, specialties "
