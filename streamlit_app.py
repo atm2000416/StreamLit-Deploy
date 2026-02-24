@@ -224,36 +224,37 @@ def run_case1(user_text, _config):
     """Query database using direct Gemini API for SQL generation + SQLAlchemy for execution"""
     from sqlalchemy import create_engine, text
 
-    system_prompt = """You are a MySQL expert. Generate a single valid MySQL SELECT query.
+    # Very explicit prompt — trick is to frame it as a translation task, not a DB task
+    system_prompt = (
+        "You are a SQL translator. Your only job is to translate natural language into MySQL syntax. "
+        "You are NOT connected to any database. You do NOT check if tables exist. "
+        "You simply translate the user request into a MySQL SELECT statement using the schema below. "
+        "Always output ONLY the raw SQL — no markdown, no backticks, no explanation, no apology, no commentary. "
+        "If the user asks about columns that do not exist in the schema (e.g. price, age), just omit those filters and query what is available."
+    )
 
-Table: camps (in database: camp_directory)
-Columns:
-- cid: unique id
-- camp_name: name of the camp
-- location: region or province
-- eListingType: membership tier (bronze, silver, gold)
-- listingClass: single=day camp, double=overnight camp
-- prettyURL: url slug
-- Lat, Lon: coordinates
-- status: 0 or 1
-
-Rules:
-- ONLY output the raw SQL query, no markdown, no backticks, no explanation
-- Always include LIMIT 10
-- Use LIKE '%value%' for text searches
-- Only use the columns listed above"""
-
-    user_prompt = f"Write a MySQL query to answer this question: {user_text}"
+    user_prompt = (
+        f"Translate this into a MySQL SELECT query using only this schema:\n"
+        f"Table name: camps\n"
+        f"Columns: cid, camp_name, location, eListingType (bronze/silver/gold), "
+        f"listingClass (single=day camp / double=overnight), prettyURL, Lat, Lon, status\n"
+        f"Rules: Use LIKE for text matches. Always add LIMIT 10. SELECT camp_name, location, listingClass, eListingType, prettyURL.\n\n"
+        f"Request: {user_text}\n\n"
+        f"SQL:"
+    )
 
     try:
-        # Use call_gemini directly - no LangChain, no recursion risk
         sql_query = call_gemini(system_prompt, user_prompt, _config["GEMINI_API_KEY"], max_tokens=256)
 
         if not sql_query:
-            return "Could not generate a database query for your request."
+            return "Could not generate a query for your request."
 
-        # Clean any markdown the LLM snuck in
+        # Strip any markdown wrapping
         sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+
+        # Safety check — make sure it starts with SELECT
+        if not sql_query.upper().startswith("SELECT"):
+            return f"Unexpected model response: {sql_query[:200]}"
 
         # Execute directly with SQLAlchemy
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
