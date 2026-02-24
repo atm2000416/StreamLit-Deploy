@@ -281,7 +281,7 @@ def run_case1(user_text, _config):
             params[f'kw{i}'] = f"%{kw}%"
 
     where_clause = " AND ".join(conditions)
-    sql_query = f"SELECT camp_name, location, listingClass, eListingType, prettyURL FROM camps WHERE {where_clause} LIMIT 10"
+    sql_query = f"SELECT cid, camp_name, location, listingClass, eListingType, prettyURL FROM camps WHERE {where_clause} LIMIT 10"
 
     try:
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
@@ -293,7 +293,7 @@ def run_case1(user_text, _config):
             if not rows:
                 # Fallback — return top 10 active camps if no filters matched
                 fallback = conn.execute(text(
-                    "SELECT camp_name, location, listingClass, eListingType, prettyURL "
+                    "SELECT cid, camp_name, location, listingClass, eListingType, prettyURL "
                     "FROM camps WHERE status = 1 ORDER BY eListingType DESC LIMIT 10"
                 ))
                 rows = fallback.fetchall()
@@ -310,10 +310,11 @@ def run_case1(user_text, _config):
                 tier = row_dict.get("eListingType", "")
                 pretty_url = row_dict.get("prettyURL", "")
 
-                # Build verified camps.ca URL directly from prettyURL slug
-                if pretty_url:
-                    full_url = f"https://www.camps.ca/camp/{pretty_url}"
-                    camp_list.append(f"- **{name}** ([camps.ca/camp/{pretty_url}]({full_url})) — {style}, {location} [{tier}]")
+                # Build verified camps.ca URL using prettyURL slug + cid (correct format)
+                cid = row_dict.get("cid", "")
+                if pretty_url and cid:
+                    full_url = f"https://www.camps.ca/{pretty_url}/{cid}"
+                    camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}/{cid}]({full_url})) — {style}, {location} [{tier}]")
                 else:
                     camp_list.append(f"- **{name}** — {style}, {location} [{tier}]")
 
