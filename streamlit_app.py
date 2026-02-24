@@ -701,9 +701,10 @@ def process_query(user_text, config, client_camps, chat_history=None):
     """Main query processing pipeline"""
     start_time = time.time()
 
-    # Combine recent user messages for better context across conversation turns
+    # Combine only the immediately preceding user message for context
+    # Using more history causes keyword bleed from earlier unrelated queries
     if chat_history:
-        recent_user_msgs = [m["content"] for m in chat_history[-6:] if m["role"] == "user"]
+        recent_user_msgs = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
         combined_text = " ".join(recent_user_msgs + [user_text])
     else:
         combined_text = user_text
