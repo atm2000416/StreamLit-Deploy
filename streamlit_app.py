@@ -201,25 +201,20 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
 # QUERY CLASSIFICATION
 # ═════════════════════════════════════════════
 def classify_query(user_text):
-    """Fast keyword-based classification"""
+    """Route queries — default to Case1 (SQL) for most camp searches"""
     text_lower = user_text.lower()
-    
-    case1_keywords = ['how many', 'count', 'average', 'price', 'cost', 'under $', 
-                      'capacity', 'available', 'cheapest', 'most expensive', 'compare']
-    if any(kw in text_lower for kw in case1_keywords):
-        return "Case1"
-    
-    case2_keywords = ['describe', 'what is', 'tell me about', 'amenities', 
-                      'facilities', 'programs', 'activities', 'like']
+
+    # Case2: only for detailed descriptive questions about a specific camp
+    case2_keywords = ['describe', 'tell me about', 'amenities', 'facilities', 'what is it like']
     if any(kw in text_lower for kw in case2_keywords):
         return "Case2"
-    
-    return "Case3"
+
+    # Everything else goes to Case1 (SQL keyword search)
+    return "Case1"
 
 # ═════════════════════════════════════════════
 # CASE 1: SQL AGENT
 # ═════════════════════════════════════════════
-@st.cache_data(ttl=1)
 def run_case1(user_text, _config):
     """Query camps database using keyword extraction + hardcoded SQL templates"""
     from sqlalchemy import create_engine, text
@@ -332,46 +327,45 @@ def run_case1(user_text, _config):
 # CASE 2: VECTOR SEARCH
 # ═════════════════════════════════════════════
 
-@st.cache_data(ttl=300)
 def run_case2(user_text, _config):
-    """Search vector database for descriptive content"""
+    """Search Pinecone vector DB directly — no LangChain wrapper"""
     from pinecone import Pinecone
-    from langchain_core.embeddings import Embeddings
-    from langchain_pinecone import PineconeVectorStore
 
-    class LlamaEmbeddings(Embeddings):
-        def __init__(self, pc):
-            self.pc = pc
-        def embed_query(self, text):
-            return self.pc.inference.embed(
-                model="llama-text-embed-v2",
-                inputs=[text],
-                parameters={"input_type": "query", "truncate": "END"}
-            )[0]["values"]
-        def embed_documents(self, texts):
-            return [e["values"] for e in self.pc.inference.embed(
-                model="llama-text-embed-v2",
-                inputs=texts,
-                parameters={"input_type": "passage", "truncate": "END"}
-            )]
+    try:
+        pc = Pinecone(api_key=_config["PINECONE_API_KEY"])
+        index = pc.Index(_config["INDEX_NAME"], host=_config["INDEX_HOST"])
 
-    pc = Pinecone(api_key=_config["PINECONE_API_KEY"])
-    index = pc.Index(_config["INDEX_NAME"], host=_config["INDEX_HOST"])
-    embeddings = LlamaEmbeddings(pc)
-    
-    vectorstore = PineconeVectorStore(
-        index=index, embedding=embeddings,
-        namespace=_config["NAMESPACE"], text_key="text"
-    )
-    
-    results = vectorstore.similarity_search_by_vector_with_score(
-        embeddings.embed_query(user_text), k=5
-    )
-    
-    if not results:
-        return "No camps found matching your criteria."
-    
-    return "\n\n".join([doc.page_content for doc, _ in results])
+        # Embed query directly via Pinecone inference API
+        embed_response = pc.inference.embed(
+            model="llama-text-embed-v2",
+            inputs=[user_text],
+            parameters={"input_type": "query", "truncate": "END"}
+        )
+        query_vector = embed_response[0]["values"]
+
+        # Query Pinecone directly
+        results = index.query(
+            vector=query_vector,
+            top_k=5,
+            namespace=_config["NAMESPACE"],
+            include_metadata=True
+        )
+
+        matches = results.get("matches", [])
+        if not matches:
+            return ""
+
+        texts = []
+        for match in matches:
+            meta = match.get("metadata", {})
+            text = meta.get("text", "") or meta.get("content", "") or str(meta)
+            if text:
+                texts.append(text)
+
+        return "\n\n".join(texts) if texts else ""
+
+    except Exception as e:
+        return ""
 
 # ═════════════════════════════════════════════
 # CLIENT-ONLY FILTER WITH URL VALIDATION
