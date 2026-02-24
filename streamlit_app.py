@@ -706,10 +706,17 @@ def process_query(user_text, config, client_camps, chat_history=None):
     """Main query processing pipeline"""
     start_time = time.time()
 
-    # Combine only the immediately preceding user message for context
-    # Using more history causes keyword bleed from earlier unrelated queries
+    # Combine context from recent messages
+    # For short follow-up messages (< 5 words), include more history
+    # For longer messages, use only the last user message to avoid keyword bleed
+    word_count = len(user_text.split())
     if chat_history:
-        recent_user_msgs = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
+        if word_count <= 5:
+            # Short follow-up like "day camps only" or "under $500" — use last 4 messages
+            recent_user_msgs = [m["content"] for m in chat_history[-4:] if m["role"] == "user"]
+        else:
+            # Longer query — use only last 1 message to avoid bleed
+            recent_user_msgs = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
         combined_text = " ".join(recent_user_msgs + [user_text])
     else:
         combined_text = user_text
