@@ -364,12 +364,9 @@ def run_case1(user_text, _config):
             params['region'] = f"%{region}%"
 
         if codes:
-            regex = "|".join(str(c) for c in codes)
-            conditions.append("(specialties REGEXP :spec_regex OR program_names REGEXP :prog_regex)")
-            kw_list = [kw for kw, c in specialty_map.items() if any(x in codes for x in c)]
-            prog_regex = "|".join(set(kw_list[:10]))
+            regex = "|".join([f"(^|,){c}(,|$)" for c in codes])
+            conditions.append("specialties REGEXP :spec_regex")
             params['spec_regex'] = regex
-            params['prog_regex'] = prog_regex
 
         if age:
             conditions.append("age_min <= :age AND age_max >= :age")
@@ -436,10 +433,6 @@ def run_case1(user_text, _config):
             rows = result.fetchall()
             col_names = list(result.keys())
 
-            # DEBUG — remove after testing
-            import json
-            debug_info = f"\n\n🔍 DEBUG: sql={sql[:200]} | params={json.dumps({k: str(v) for k,v in params.items()})}"
-
             if rows:
                 camps = format_rows(rows, col_names)
                 filters = list(filter(None, [
@@ -450,7 +443,7 @@ def run_case1(user_text, _config):
                     f"under ${cost_filter}" if cost_filter else None,
                 ]))
                 summary = f" (filters: {', '.join(filters)})" if filters else ""
-                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps) + debug_info
+                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps)
 
             # Try 2: Drop cost filter only
             if cost_filter:
