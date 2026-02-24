@@ -426,9 +426,6 @@ def run_case1(user_text, _config):
 
             # Try 1: Full search — all filters
             sql, params = build_query(location_filter, region_filter, specialty_codes, age_filter, cost_filter, style_filter)
-            rows = conn.execute(text(sql), params).fetchall()
-            col_names = list(conn.execute(text(sql), params).keys()) if not rows else list(conn.execute(text(sql), params).keys())
-
             result = conn.execute(text(sql), params)
             rows = result.fetchall()
             col_names = list(result.keys())
