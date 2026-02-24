@@ -216,18 +216,20 @@ def classify_query(user_text):
 # CASE 1: SQL AGENT
 # ═════════════════════════════════════════════
 def run_case1(user_text, _config):
-    """Query camps database using keyword extraction + hardcoded SQL templates"""
+    """Query camps using proper JOINs with mapping table for province and category filtering"""
     from sqlalchemy import create_engine, text
 
-    # Extract filters from user text — no LLM needed for SQL generation
     text_lower = user_text.lower()
 
-    # Location filter
+    # Province filter — must match exact values in mapping.grouping column
     provinces = {
-        'ontario': 'Ontario', 'quebec': 'Quebec', 'bc': 'BC',
-        'british columbia': 'BC', 'alberta': 'Alberta',
+        'british columbia': 'British Columbia', 'bc': 'British Columbia',
+        'ontario': 'Ontario', 'quebec': 'Quebec', 'alberta': 'Alberta',
         'nova scotia': 'Nova Scotia', 'new brunswick': 'New Brunswick',
-        'manitoba': 'Manitoba', 'saskatchewan': 'Saskatchewan'
+        'manitoba': 'Manitoba', 'saskatchewan': 'Saskatchewan',
+        'newfoundland': 'Newfoundland and Labrador', 'pei': 'Prince Edward Island',
+        'prince edward island': 'Prince Edward Island', 'yukon': 'Yukon',
+        'northwest territories': 'Northwest Territories', 'nunavut': 'Nunavut'
     }
     location_filter = None
     for keyword, value in provinces.items():
@@ -237,9 +239,9 @@ def run_case1(user_text, _config):
 
     # Day/overnight filter
     style_filter = None
-    if 'overnight' in text_lower or 'sleepaway' in text_lower or 'sleep away' in text_lower:
+    if 'overnight' in text_lower or 'sleepaway' in text_lower or 'residential' in text_lower:
         style_filter = 'double'
-    elif 'day camp' in text_lower or 'day camp' in text_lower:
+    elif 'day camp' in text_lower:
         style_filter = 'single'
 
     # Tier filter
@@ -249,39 +251,60 @@ def run_case1(user_text, _config):
             tier_filter = tier
             break
 
-    # Camp name keyword search
+    # Camp name keyword search — used when no category match
     name_keywords = []
-    for word in ['stem', 'science', 'sports', 'arts', 'music', 'hockey', 'soccer',
-                 'basketball', 'tech', 'coding', 'robotics', 'dance', 'theatre',
-                 'adventure', 'outdoor', 'equestrian', 'riding', 'sailing', 'tennis',
-                 'golf', 'leadership', 'french', 'language', 'math']:
+    for word in ['stem', 'science', 'technology', 'computer', 'sports', 'arts', 'music',
+                 'hockey', 'soccer', 'basketball', 'tech', 'coding', 'robotics', 'dance',
+                 'theatre', 'adventure', 'outdoor', 'equestrian', 'riding', 'sailing',
+                 'tennis', 'golf', 'leadership', 'french', 'language', 'math', 'drama',
+                 'film', 'nature', 'wilderness', 'canoe', 'swim', 'gymnastics']:
         if word in text_lower:
             name_keywords.append(word)
 
-    # Build SQL query dynamically
-    conditions = ["status = 1"]
+    # Build SQL with proper JOIN to mapping table for province filtering
     params = {}
+    conditions = ["c.status = 1"]
 
     if location_filter:
-        conditions.append("location LIKE :location")
-        params['location'] = f"%{location_filter}%"
+        conditions.append("m.`grouping` = :province")
+        params['province'] = location_filter
 
     if style_filter:
-        conditions.append("listingClass = :style")
+        conditions.append("c.listingClass = :style")
         params['style'] = style_filter
 
     if tier_filter:
-        conditions.append("eListingType = :tier")
+        conditions.append("c.eListingType = :tier")
         params['tier'] = tier_filter
 
     if name_keywords:
-        name_conditions = " OR ".join([f"camp_name LIKE :kw{i}" for i, _ in enumerate(name_keywords)])
-        conditions.append(f"({name_conditions})")
+        kw_conditions = " OR ".join([f"c.camp_name LIKE :kw{i}" for i, _ in enumerate(name_keywords)])
+        conditions.append(f"({kw_conditions})")
         for i, kw in enumerate(name_keywords):
             params[f'kw{i}'] = f"%{kw}%"
 
     where_clause = " AND ".join(conditions)
-    sql_query = f"SELECT cid, camp_name, location, listingClass, eListingType, prettyURL FROM camps WHERE {where_clause} LIMIT 10"
+
+    if location_filter:
+        sql_query = f"""SELECT c.cid, c.camp_name, m.p_region, m.`grouping` as province,
+            c.listingClass, c.eListingType, c.prettyURL
+            FROM camps c
+            JOIN mapping m ON c.location = m.mid
+            WHERE {where_clause}
+            GROUP BY c.cid
+            LIMIT 10"""
+    else:
+        sql_query = f"""SELECT c.cid, c.camp_name, c.location,
+            c.listingClass, c.eListingType, c.prettyURL
+            FROM camps c
+            WHERE {where_clause}
+            LIMIT 10"""
+
+    fallback_sql = """SELECT c.cid, c.camp_name, c.listingClass, c.eListingType, c.prettyURL
+        FROM camps c
+        WHERE c.status = 1
+        ORDER BY c.eListingType DESC
+        LIMIT 10"""
 
     try:
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
@@ -291,13 +314,9 @@ def run_case1(user_text, _config):
             col_names = list(result.keys())
 
             if not rows:
-                # Fallback — return top 10 active camps if no filters matched
-                fallback = conn.execute(text(
-                    "SELECT cid, camp_name, location, listingClass, eListingType, prettyURL "
-                    "FROM camps WHERE status = 1 ORDER BY eListingType DESC LIMIT 10"
-                ))
-                rows = fallback.fetchall()
-                col_names = list(fallback.keys())
+                result = conn.execute(text(fallback_sql))
+                rows = result.fetchall()
+                col_names = list(result.keys())
                 if not rows:
                     return "No camps found in our database."
 
@@ -305,21 +324,22 @@ def run_case1(user_text, _config):
             for row in rows:
                 row_dict = dict(zip(col_names, row))
                 name = row_dict.get("camp_name", "Unknown")
-                location = row_dict.get("location", "N/A")
+                province = row_dict.get("province") or row_dict.get("grouping", "")
+                region = row_dict.get("p_region", "")
+                location_str = f"{region}, {province}" if region and province else province or region or "N/A"
                 style = "Day Camp" if row_dict.get("listingClass") == "single" else "Overnight Camp"
                 tier = row_dict.get("eListingType", "")
                 pretty_url = row_dict.get("prettyURL", "")
-
-                # Build verified camps.ca URL using prettyURL slug + cid (correct format)
                 cid = row_dict.get("cid", "")
+
                 if pretty_url and cid:
                     full_url = f"https://www.camps.ca/{pretty_url}/{cid}"
-                    camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}/{cid}]({full_url})) — {style}, {location} [{tier}]")
+                    camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}]({full_url})) — {style}, {location_str} [{tier}]")
                 else:
-                    camp_list.append(f"- **{name}** — {style}, {location} [{tier}]")
+                    camp_list.append(f"- **{name}** — {style}, {location_str} [{tier}]")
 
             filters_used = []
-            if location_filter: filters_used.append(f"location: {location_filter}")
+            if location_filter: filters_used.append(f"province: {location_filter}")
             if style_filter: filters_used.append("overnight" if style_filter == "double" else "day camp")
             if tier_filter: filters_used.append(f"tier: {tier_filter}")
             if name_keywords: filters_used.append(f"keywords: {', '.join(name_keywords)}")
@@ -537,10 +557,10 @@ def process_query(user_text, config, client_camps):
         ans2 = run_case2(user_text, config)
         answer = f"{ans1}\n\n{ans2}"
     
-    result = filter_to_clients_only(answer, client_camps, user_text)
+    # Skip URL injection since run_case1 builds URLs directly from database
     elapsed = time.time() - start_time
     
-    return result, elapsed
+    return answer, elapsed
 
 # ═════════════════════════════════════════════
 # STREAMLIT UI
