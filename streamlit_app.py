@@ -235,18 +235,20 @@ def run_case1(user_text, _config):
     db = SQLDatabase.from_uri(
         get_db_uri(_config, _config["DB_CAMPDB"]),
         view_support=True,
-        sample_rows_in_table_info=0
+        sample_rows_in_table_info=2
     )
 
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
     tools = toolkit.get_tools()
-    
+
     prompt = (
-        "You are a SQL expert querying a camps database. "
-        "IMPORTANT: Only suggest camps that exist in this database. "
-        f"Query: {user_text}. Use LIMIT 10."
+        "You are a SQL expert. You have access to a MySQL database. "
+        "IMPORTANT: Before writing any query, ALWAYS use the list_tables tool to discover "
+        "the available tables, then use get_schema to inspect the relevant table columns. "
+        "Never assume a table name - always check first. "
+        "Only return results that exist in the database. Use LIMIT 10 on all queries."
     )
-    
+
     agent = create_react_agent(llm, tools, prompt=prompt)
     
     try:
