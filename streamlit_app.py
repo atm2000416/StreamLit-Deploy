@@ -4,7 +4,7 @@ Business Logic: Client-Only Member Camps with Verified URLs
 Platform: Streamlit Cloud
 Databases: Aiven MySQL (campdb, camp_directory, common_update)
 Vector DB: Pinecone
-AI: Google Gemini 2.0 Flash
+AI: Google Gemini 2.5 Flash Lite
 """
 
 import streamlit as st
@@ -169,7 +169,7 @@ def load_client_camps(config):
 # ═════════════════════════════════════════════
 # GEMINI API
 # ═════════════════════════════════════════════
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.5-flash-lite"
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
@@ -222,7 +222,7 @@ def classify_query(user_text):
 @st.cache_data(ttl=300)
 def run_case1(user_text, _config):
     """Query database for structured data"""
-    from langchain.chat_models import init_chat_model
+    from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_community.utilities import SQLDatabase
     from langchain_community.agent_toolkits import SQLDatabaseToolkit
     from langchain import hub
@@ -230,7 +230,7 @@ def run_case1(user_text, _config):
 
     os.environ["GOOGLE_API_KEY"] = _config["GEMINI_API_KEY"]
 
-    llm = init_chat_model("gemini-2.0-flash", model_provider="google_genai")
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=_config["GEMINI_API_KEY"])
     
     db = SQLDatabase.from_uri(
         get_db_uri(_config, _config["DB_CAMPDB"]),
