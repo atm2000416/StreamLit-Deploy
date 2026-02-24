@@ -308,7 +308,14 @@ def run_case1(user_text, _config):
                 location = row_dict.get("location", "N/A")
                 style = "Day Camp" if row_dict.get("listingClass") == "single" else "Overnight Camp"
                 tier = row_dict.get("eListingType", "")
-                camp_list.append(f"- {name} ({style}, {location}) [{tier}]")
+                pretty_url = row_dict.get("prettyURL", "")
+
+                # Build verified camps.ca URL directly from prettyURL slug
+                if pretty_url:
+                    full_url = f"https://www.camps.ca/camp/{pretty_url}"
+                    camp_list.append(f"- **{name}** ([camps.ca/camp/{pretty_url}]({full_url})) — {style}, {location} [{tier}]")
+                else:
+                    camp_list.append(f"- **{name}** — {style}, {location} [{tier}]")
 
             filters_used = []
             if location_filter: filters_used.append(f"location: {location_filter}")
