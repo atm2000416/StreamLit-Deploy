@@ -447,7 +447,8 @@ def run_case1(user_text, _config):
 
             # Try 2: Drop cost filter only
             if cost_filter:
-                result = conn.execute(text(*build_query(location_filter, region_filter, specialty_codes, age_filter, None, style_filter)))
+                sql, params = build_query(location_filter, region_filter, specialty_codes, age_filter, None, style_filter)
+                result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
@@ -455,7 +456,8 @@ def run_case1(user_text, _config):
 
             # Try 3: Drop age + cost, keep province + specialty
             if age_filter or cost_filter:
-                result = conn.execute(text(*build_query(location_filter, region_filter, specialty_codes, None, None, style_filter)))
+                sql, params = build_query(location_filter, region_filter, specialty_codes, None, None, style_filter)
+                result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
@@ -463,7 +465,8 @@ def run_case1(user_text, _config):
 
             # Try 4: Drop region, keep province + specialty
             if region_filter:
-                result = conn.execute(text(*build_query(location_filter, None, specialty_codes, age_filter, None, style_filter)))
+                sql, params = build_query(location_filter, None, specialty_codes, age_filter, None, style_filter)
+                result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
@@ -471,7 +474,8 @@ def run_case1(user_text, _config):
 
             # Try 5: Province only — drop specialty, keep location
             if specialty_codes and location_filter:
-                result = conn.execute(text(*build_query(location_filter, None, [], None, None, style_filter)))
+                sql, params = build_query(location_filter, None, [], None, None, style_filter)
+                result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
@@ -483,7 +487,8 @@ def run_case1(user_text, _config):
 
             # Try 6: Specialty across Canada — only if no province was specified
             if specialty_codes and not location_filter:
-                result = conn.execute(text(*build_query(None, None, specialty_codes, age_filter, None, style_filter)))
+                sql, params = build_query(None, None, specialty_codes, age_filter, None, style_filter)
+                result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
