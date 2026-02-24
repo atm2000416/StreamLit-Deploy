@@ -260,7 +260,18 @@ def run_case1(user_text, _config):
         'academic': [314, 129],
     }
 
-    # Province filter
+    # Province filter — includes major cities mapped to their province
+    city_to_province = {
+        'vancouver': 'British Columbia', 'victoria': 'British Columbia',
+        'kelowna': 'British Columbia', 'surrey': 'British Columbia',
+        'toronto': 'Ontario', 'ottawa': 'Ontario', 'hamilton': 'Ontario',
+        'mississauga': 'Ontario', 'brampton': 'Ontario', 'london': 'Ontario',
+        'montreal': 'Quebec', 'quebec city': 'Quebec', 'laval': 'Quebec',
+        'calgary': 'Alberta', 'edmonton': 'Alberta',
+        'winnipeg': 'Manitoba', 'saskatoon': 'Saskatchewan',
+        'regina': 'Saskatchewan', 'halifax': 'Nova Scotia',
+        'fredericton': 'New Brunswick', 'moncton': 'New Brunswick',
+    }
     provinces = {
         'british columbia': 'British Columbia', 'bc': 'British Columbia',
         'ontario': 'Ontario', 'quebec': 'Quebec', 'alberta': 'Alberta',
@@ -276,6 +287,11 @@ def run_case1(user_text, _config):
         if keyword in text_lower:
             location_filter = value
             break
+    if not location_filter:
+        for city, province in city_to_province.items():
+            if city in text_lower:
+                location_filter = province
+                break
 
     # Specialty codes from keywords
     specialty_codes = []
@@ -297,11 +313,11 @@ def run_case1(user_text, _config):
     elif 'child' in text_lower or 'kid' in text_lower:
         age_filter = 8
 
-    # Cost filter
+    # Cost filter — require $ sign to avoid matching age numbers
     cost_filter = None
-    cost_match = re.search(r'\$?\s*(\d+)', text_lower)
-    if cost_match and any(w in text_lower for w in ['under', 'below', 'less than', 'budget', 'about', 'around']):
-        cost_filter = int(cost_match.group(1))
+    cost_match = re.search(r'\$(\s*\d+)', text_lower)
+    if cost_match:
+        cost_filter = int(cost_match.group(1).strip())
 
     # Day/overnight filter
     style_filter = None
@@ -378,7 +394,7 @@ def run_case1(user_text, _config):
             details = " | ".join(filter(None, [age_str, cost_str]))
             if pretty_url and cid:
                 full_url = f"https://www.camps.ca/{pretty_url}/{cid}"
-                camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}]({full_url})) — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
+                camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}/{cid}]({full_url})) — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
             else:
                 camp_list.append(f"- **{name}** — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
         return camp_list
