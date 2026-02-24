@@ -216,51 +216,13 @@ def classify_query(user_text):
 # CASE 1: SQL AGENT
 # ═════════════════════════════════════════════
 def run_case1(user_text, _config):
-    """Query camps using sessions table with specialty codes and proper province/age/cost filtering"""
+    """Query camps_rag — pre-joined denormalized table, no complex JOINs needed"""
     from sqlalchemy import create_engine, text
+    import re
 
     text_lower = user_text.lower()
 
-    # Specialty code mapping based on actual sessions data
-    specialty_map = {
-        'stem': [268, 18, 50, 67, 160, 180],
-        'science': [268, 50, 18],
-        'technology': [268, 18, 180],
-        'coding': [18, 180, 268],
-        'robotics': [67, 268, 160],
-        'computer': [18, 180, 268],
-        'engineering': [160, 268, 50],
-        'math': [129, 268, 18],
-        'arts': [9, 172],
-        'art': [9, 172],
-        'music': [37],
-        'guitar': [37],
-        'dance': [22],
-        'theatre': [172],
-        'drama': [172],
-        'film': [172],
-        'soccer': [54],
-        'basketball': [12],
-        'tennis': [66],
-        'racquet': [66],
-        'equestrian': [30],
-        'riding': [30],
-        'horse': [30],
-        'cooking': [133],
-        'chef': [133],
-        'aerospace': [50],
-        'leadership': [79, 181],
-        'outdoor': [181, 79],
-        'adventure': [181, 79],
-        'hockey': [188],
-        'fitness': [188],
-        'sports': [188, 12, 54, 66],
-        'french': [314],
-        'language': [314],
-        'academic': [314, 129],
-    }
-
-    # City to province mapping
+    # ── Province / city detection ──────────────────────────────────────────
     city_to_province = {
         'vancouver': 'British Columbia', 'victoria': 'British Columbia',
         'kelowna': 'British Columbia', 'surrey': 'British Columbia',
@@ -272,19 +234,18 @@ def run_case1(user_text, _config):
         'regina': 'Saskatchewan', 'halifax': 'Nova Scotia',
         'fredericton': 'New Brunswick', 'moncton': 'New Brunswick',
     }
-
-    # City/region to specific mapping MIDs for more precise filtering
-    city_to_mids = {
-        'ottawa': [172, 173, 174, 175, 176, 177, 341, 6280, 6281],
-        'toronto': [100, 6084, 6085, 6086, 6087, 6088, 6089, 6090, 6091, 6092, 6093, 6094, 6095, 6096, 6097, 6098],
-        'vancouver': [281, 340, 1030, 1215],
-        'calgary': [390, 391, 392],
-        'edmonton': [400, 401, 402],
-        'montreal': [285, 286, 287, 288, 289, 290, 291],
-        'hamilton': [62, 63, 64],
-        'waterloo': [44, 45, 46],
-        'kingston': [191, 192, 193],
-        'barrie': [131, 132, 133],
+    city_to_region = {
+        'ottawa':      'Ottawa Region',
+        'toronto':     'City of Toronto',
+        'vancouver':   'British Columbia',
+        'hamilton':    'City of Hamilton',
+        'waterloo':    'Waterloo - Wellington',
+        'kingston':    'Kingston - Prince Edward',
+        'barrie':      'Barrie - Orillia - Midland',
+        'calgary':     'Calgary',
+        'edmonton':    'Edmonton',
+        'montreal':    'Montreal',
+        'halifax':     'Halifax',
     }
     provinces = {
         'british columbia': 'British Columbia', 'bc': 'British Columbia',
@@ -296,35 +257,70 @@ def run_case1(user_text, _config):
         'yukon': 'Yukon', 'northwest territories': 'Northwest Territories',
         'nunavut': 'Nunavut'
     }
+
     location_filter = None
-    city_mids = []
+    region_filter = None
+
     for keyword, value in provinces.items():
         if keyword in text_lower:
             location_filter = value
             break
-    if not location_filter:
-        for city, province in city_to_province.items():
-            if city in text_lower:
+    for city, province in city_to_province.items():
+        if city in text_lower:
+            if not location_filter:
                 location_filter = province
-                city_mids = city_to_mids.get(city, [])
-                break
-    else:
-        # Also check for specific city within a named province
-        for city, mids in city_to_mids.items():
-            if city in text_lower:
-                city_mids = mids
-                break
+            region_filter = city_to_region.get(city)
+            break
 
-    # Specialty codes from keywords
-    specialty_codes = []
-    for keyword, codes in specialty_map.items():
-        if keyword in text_lower:
-            specialty_codes.extend(codes)
-    specialty_codes = list(set(specialty_codes))
+    # ── Specialty codes ────────────────────────────────────────────────────
+    specialty_map = {
+        'stem':        [268, 18, 50, 67, 160, 180],
+        'science':     [268, 50, 18],
+        'technology':  [268, 18, 180],
+        'coding':      [18, 180, 268],
+        'programming': [18, 180, 268],
+        'computer':    [18, 180, 268],
+        'robotics':    [67, 268, 160],
+        'engineering': [160, 268, 50],
+        'math':        [129, 268, 18],
+        'arts':        [9, 172],
+        'art':         [9, 172],
+        'music':       [37],
+        'dance':       [22],
+        'theatre':     [172],
+        'drama':       [172],
+        'film':        [172],
+        'soccer':      [54],
+        'basketball':  [12],
+        'tennis':      [66],
+        'equestrian':  [30],
+        'riding':      [30],
+        'horse':       [30],
+        'cooking':     [133],
+        'chef':        [133],
+        'aerospace':   [50],
+        'leadership':  [79, 181],
+        'outdoor':     [181, 79],
+        'adventure':   [181, 79],
+        'hockey':      [188],
+        'sports':      [188, 12, 54, 66],
+        'french':      [314],
+        'language':    [314],
+        'academic':    [314, 129],
+        'sailing':     [181],
+        'canoe':       [181],
+        'gymnastics':  [22],
+        'swim':        [181],
+        'golf':        [188],
+    }
 
-    # Age filter
+    specialty_codes = list(set(
+        code for kw, codes in specialty_map.items()
+        if kw in text_lower for code in codes
+    ))
+
+    # ── Age filter ─────────────────────────────────────────────────────────
     age_filter = None
-    import re
     age_match = re.search(r'(\d+)\s*(?:year|yr|yo|-year)', text_lower)
     if age_match:
         age_filter = int(age_match.group(1))
@@ -335,64 +331,59 @@ def run_case1(user_text, _config):
     elif 'child' in text_lower or 'kid' in text_lower:
         age_filter = 8
 
-    # Cost filter — require $ sign to avoid matching age numbers
+    # ── Cost filter ────────────────────────────────────────────────────────
     cost_filter = None
     cost_match = re.search(r'\$(\s*\d+)', text_lower)
     if cost_match:
         cost_filter = int(cost_match.group(1).strip())
 
-    # Day/overnight filter
+    # ── Day/overnight ──────────────────────────────────────────────────────
     style_filter = None
     if 'overnight' in text_lower or 'sleepaway' in text_lower or 'residential' in text_lower:
         style_filter = 'double'
     elif 'day camp' in text_lower:
         style_filter = 'single'
 
-    def build_query(province, codes, age, cost, style, limit=10, mids=None):
-        conditions = ["c.status = 1", "s.specialty != 0"]
+    # ── Build query against camps_rag ──────────────────────────────────────
+    def build_query(province, region, codes, age, cost, style, limit=10):
+        conditions = ["status = 1"]
         params = {}
 
+        if province:
+            conditions.append("province = :province")
+            params['province'] = province
+
+        if region:
+            conditions.append("p_region LIKE :region")
+            params['region'] = f"%{region}%"
+
         if codes:
-            placeholders = ", ".join([f":sc{i}" for i, _ in enumerate(codes)])
-            conditions.append(f"(s.specialty IN ({placeholders}) OR s.specialty2 IN ({placeholders}))")
-            for i, code in enumerate(codes):
-                params[f'sc{i}'] = code
+            regex = "|".join(str(c) for c in codes)
+            conditions.append("specialties REGEXP :spec_regex OR program_names REGEXP :prog_regex")
+            kw_list = [kw for kw, c in specialty_map.items() if any(x in codes for x in c)]
+            prog_regex = "|".join(set(kw_list[:10]))
+            params['spec_regex'] = regex
+            params['prog_regex'] = prog_regex
 
         if age:
-            conditions.append("s.age_from <= :age AND s.age_to >= :age")
+            conditions.append("age_min <= :age AND age_max >= :age")
             params['age'] = age
 
         if cost:
-            conditions.append("s.cost_from <= :cost")
+            conditions.append("cost_min <= :cost")
             params['cost'] = cost
 
         if style:
-            conditions.append("c.listingClass = :style")
+            conditions.append("listingClass = :style")
             params['style'] = style
 
-        if province:
-            conditions.append("m.`grouping` = :province")
-            params['province'] = province
-            if mids:
-                mid_placeholders = ", ".join([f":mid{i}" for i, _ in enumerate(mids)])
-                conditions.append(f"m.mid IN ({mid_placeholders})")
-                for i, mid in enumerate(mids):
-                    params[f'mid{i}'] = mid
-            from_clause = """camp_directory.camps c
-                JOIN camp_directory.sessions s ON s.cid = c.cid
-                JOIN camp_directory.extra_locations el ON el.cid = c.cid
-                JOIN common_update.mapping m ON m.mid = el.locations"""
-        else:
-            from_clause = """camp_directory.camps c
-                JOIN camp_directory.sessions s ON s.cid = c.cid"""
-
         where = " AND ".join(conditions)
-        sql = f"""SELECT DISTINCT c.cid, c.camp_name, c.listingClass, c.eListingType, c.prettyURL,
-                s.age_from, s.age_to, s.cost_from, s.cost_to,
-                {'m.p_region, m.`grouping` as province' if province else 'NULL as p_region, NULL as province'}
-            FROM {from_clause}
+        sql = f"""SELECT DISTINCT cid, camp_name, province, p_region, s_region,
+                listingClass, eListingType, prettyURL,
+                age_min, age_max, cost_min, cost_max, specialties
+            FROM camp_directory.camps_rag
             WHERE {where}
-            ORDER BY c.eListingType DESC
+            ORDER BY FIELD(eListingType, 'gold', 'silver', 'bronze'), camp_name
             LIMIT {limit}"""
         return sql, params
 
@@ -405,95 +396,98 @@ def run_case1(user_text, _config):
             if name in seen:
                 continue
             seen.add(name)
-            province = d.get("province") or ""
-            region = d.get("p_region") or ""
-            location_str = f"{region}, {province}".strip(", ") if (region or province) else "N/A"
-            style = "Day Camp" if d.get("listingClass") == "single" else "Overnight Camp"
-            tier = d.get("eListingType", "")
-            pretty_url = d.get("prettyURL", "")
-            cid = d.get("cid", "")
-            age_from = d.get("age_from", "")
-            age_to = d.get("age_to", "")
-            cost_from = d.get("cost_from", "")
-            cost_to = d.get("cost_to", "")
-            age_str = f"Ages {age_from}-{age_to}" if age_from and age_to else ""
-            cost_str = f"${cost_from}-${cost_to}/wk" if cost_from and cost_to else (f"${cost_from}" if cost_from else "")
-            details = " | ".join(filter(None, [age_str, cost_str]))
-            if pretty_url and cid:
-                full_url = f"https://www.camps.ca/{pretty_url}/{cid}"
-                camp_list.append(f"- **{name}** ([camps.ca/{pretty_url}/{cid}]({full_url})) — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
+            province  = d.get("province") or ""
+            region    = d.get("p_region") or ""
+            loc_str   = f"{region}, {province}".strip(", ") if (region or province) else "N/A"
+            style     = "Day Camp" if d.get("listingClass") == "single" else "Overnight Camp"
+            tier      = d.get("eListingType", "")
+            url_slug  = d.get("prettyURL", "")
+            cid       = d.get("cid", "")
+            age_from  = d.get("age_min", "")
+            age_to    = d.get("age_max", "")
+            cost_from = d.get("cost_min", "")
+            cost_to   = d.get("cost_max", "")
+            age_str   = f"Ages {age_from}-{age_to}" if age_from and age_to else ""
+            cost_str  = f"${cost_from}-${cost_to}/wk" if cost_from and cost_to else (f"${cost_from}/wk" if cost_from else "")
+            details   = " | ".join(filter(None, [age_str, cost_str]))
+            if url_slug and cid:
+                full_url = f"https://www.camps.ca/{url_slug}/{cid}"
+                line = f"- **{name}** ([camps.ca/{url_slug}/{cid}]({full_url})) — {style}, {loc_str} [{tier}]"
             else:
-                camp_list.append(f"- **{name}** — {style}, {location_str} [{tier}]{(' | ' + details) if details else ''}")
+                line = f"- **{name}** — {style}, {loc_str} [{tier}]"
+            if details:
+                line += f" | {details}"
+            camp_list.append(line)
         return camp_list
 
     try:
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
 
-            # Try 1: Full search
-            sql, params = build_query(location_filter, specialty_codes, age_filter, cost_filter, style_filter, mids=city_mids)
+            # Try 1: Full search — all filters
+            sql, params = build_query(location_filter, region_filter, specialty_codes, age_filter, cost_filter, style_filter)
+            rows = conn.execute(text(sql), params).fetchall()
+            col_names = list(conn.execute(text(sql), params).keys()) if not rows else list(conn.execute(text(sql), params).keys())
+
             result = conn.execute(text(sql), params)
             rows = result.fetchall()
             col_names = list(result.keys())
 
             if rows:
-                camp_list = format_rows(rows, col_names)
-                filters = []
-                if location_filter: filters.append(location_filter)
-                if specialty_codes: filters.append(", ".join([k for k in specialty_map if any(c in specialty_codes for c in specialty_map[k])][:3]))
-                if age_filter: filters.append(f"age {age_filter}")
-                if cost_filter: filters.append(f"under ${cost_filter}")
+                camps = format_rows(rows, col_names)
+                filters = list(filter(None, [
+                    location_filter,
+                    region_filter,
+                    ", ".join([k for k in specialty_map if any(c in specialty_codes for c in specialty_map[k])][:3]) if specialty_codes else None,
+                    f"age {age_filter}" if age_filter else None,
+                    f"under ${cost_filter}" if cost_filter else None,
+                ]))
                 summary = f" (filters: {', '.join(filters)})" if filters else ""
-                return f"Found {len(camp_list)} camp(s){summary}:\n" + "\n".join(camp_list)
+                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps)
 
-            # Try 2: Drop cost filter
+            # Try 2: Drop cost
             if cost_filter:
-                sql, params = build_query(location_filter, specialty_codes, age_filter, None, style_filter, mids=city_mids)
-                result = conn.execute(text(sql), params)
+                result = conn.execute(text(*build_query(location_filter, region_filter, specialty_codes, age_filter, None, style_filter)))
                 rows = result.fetchall()
-                col_names = list(result.keys())
                 if rows:
-                    camp_list = format_rows(rows, col_names)
-                    return f"No camps found under ${cost_filter} — here are the closest matches:\n" + "\n".join(camp_list)
+                    camps = format_rows(rows, list(result.keys()))
+                    return f"No camps found under ${cost_filter} — closest matches:\n" + "\n".join(camps)
 
-            # Try 3: Drop age + cost, keep specialty + province
+            # Try 3: Drop age + cost
             if age_filter or cost_filter:
-                sql, params = build_query(location_filter, specialty_codes, None, None, style_filter, mids=city_mids)
-                result = conn.execute(text(sql), params)
+                result = conn.execute(text(*build_query(location_filter, region_filter, specialty_codes, None, None, style_filter)))
                 rows = result.fetchall()
-                col_names = list(result.keys())
                 if rows:
-                    camp_list = format_rows(rows, col_names)
-                    return f"Here are matching camps in {location_filter or 'Canada'}:\n" + "\n".join(camp_list)
+                    camps = format_rows(rows, list(result.keys()))
+                    return f"Here are matching camps in {region_filter or location_filter or 'Canada'}:\n" + "\n".join(camps)
 
-            # Try 4: Province only, no specialty
-            if specialty_codes and location_filter:
-                sql, params = build_query(location_filter, [], None, None, style_filter, mids=city_mids)
-                result = conn.execute(text(sql), params)
+            # Try 4: Drop region, keep province + specialty
+            if region_filter:
+                result = conn.execute(text(*build_query(location_filter, None, specialty_codes, age_filter, None, style_filter)))
                 rows = result.fetchall()
-                col_names = list(result.keys())
                 if rows:
-                    camp_list = format_rows(rows, col_names)
-                    return f"No exact specialty match found in {location_filter} — here are other camps in {location_filter}:\n" + "\n".join(camp_list)
+                    camps = format_rows(rows, list(result.keys()))
+                    return f"No camps found near {region_filter} — here are matches in {location_filter}:\n" + "\n".join(camps)
 
-            # Try 5: Specialty across all Canada, no province
+            # Try 5: Specialty across Canada, drop province
             if specialty_codes and location_filter:
-                sql, params = build_query(None, specialty_codes, age_filter, None, style_filter)
-                result = conn.execute(text(sql), params)
+                result = conn.execute(text(*build_query(None, None, specialty_codes, age_filter, None, style_filter)))
                 rows = result.fetchall()
-                col_names = list(result.keys())
                 if rows:
-                    camp_list = format_rows(rows, col_names)
-                    return f"No matching camps found in {location_filter} — here are similar camps across Canada:\n" + "\n".join(camp_list)
+                    camps = format_rows(rows, list(result.keys()))
+                    return f"No matching camps in {location_filter} — here are similar camps across Canada:\n" + "\n".join(camps)
 
             # Try 6: Top camps overall
-            sql, params = build_query(None, [], None, None, None)
-            result = conn.execute(text(sql), params)
+            result = conn.execute(text(
+                "SELECT DISTINCT cid, camp_name, province, p_region, listingClass, eListingType, prettyURL, "
+                "age_min, age_max, cost_min, cost_max, specialties "
+                "FROM camp_directory.camps_rag WHERE status = 1 "
+                "ORDER BY FIELD(eListingType,'gold','silver','bronze') LIMIT 10"
+            ))
             rows = result.fetchall()
-            col_names = list(result.keys())
             if rows:
-                camp_list = format_rows(rows, col_names)
-                return f"Here are our top member camps:\n" + "\n".join(camp_list)
+                camps = format_rows(rows, list(result.keys()))
+                return f"Here are our top member camps:\n" + "\n".join(camps)
 
             return "No camps found in our database."
 
