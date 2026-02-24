@@ -221,58 +221,77 @@ def classify_query(user_text):
 # ═════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def run_case1(user_text, _config):
-    """Query database for structured data"""
+    """Query database for structured data using direct SQL generation"""
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_community.utilities import SQLDatabase
-    from langchain_community.agent_toolkits import SQLDatabaseToolkit
-    from langchain import hub
-    from langgraph.prebuilt import create_react_agent
+    from sqlalchemy import create_engine, text
 
     os.environ["GOOGLE_API_KEY"] = _config["GEMINI_API_KEY"]
 
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=_config["GEMINI_API_KEY"])
-    
-    db = SQLDatabase.from_uri(
-        get_db_uri(_config, _config["DB_CAMP_DIR"]),
-        include_tables=["camps"],
-        view_support=True,
-        sample_rows_in_table_info=2
-    )
 
-    toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-    tools = toolkit.get_tools()
+    # Step 1: Use LLM to generate a SQL query from the user's question
+    schema_context = """
+You are a SQL expert. Generate a single MySQL SELECT query for the `camps` table in the `camp_directory` database.
 
-    prompt = (
-        "You are a SQL expert with access to a MySQL database called camp_directory. "
-        "The main table is called `camps` and has these columns: "
-        "cid (id), camp_name (name), location (region/province), eListingType (bronze/silver/gold tier), "
-        "listingClass (single=day camp, double=overnight camp), prettyURL (url slug), Lat, Lon, status, mod_date. "
-        "STRICT RULES: "
-        "1. ALWAYS query the `camps` table - never guess or invent other table names. "
-        "2. Use camp_name for searching camp names. "
-        "3. Use location for province/region filtering. "
-        "4. Use listingClass for day/overnight filtering (single=day, double=overnight). "
-        "5. Use eListingType for membership tier (bronze/silver/gold). "
-        "6. ALWAYS use LIMIT 10. "
-        "7. If a column for the requested info (e.g. price, age) does not exist, say so clearly and return what you can from the camps table. "
-        "8. NEVER say a table does not exist - the camps table always exists. "
-        "9. Return real camp_name values from query results, never make up camp names."
-    )
+Table: camps
+Columns:
+- cid: unique id
+- camp_name: name of the camp (VARCHAR)
+- location: region or province (VARCHAR)
+- eListingType: membership tier - values are 'bronze', 'silver', 'gold' (VARCHAR)
+- listingClass: camp style - 'single' means day camp, 'double' means overnight camp (VARCHAR)
+- prettyURL: url slug for the camp (VARCHAR)
+- Lat, Lon: coordinates
+- status: 0 or 1
+- mod_date: last modified timestamp
 
-    agent = create_react_agent(llm, tools)
-    
-    # Inject schema context directly into the user message so the agent cannot ignore it
-    grounded_message = f"""{prompt}
+Rules:
+- Only use columns listed above
+- Always use LIMIT 10
+- Use LIKE '%value%' for text searches
+- Return ONLY the raw SQL query, no explanation, no markdown, no backticks
+"""
+    sql_prompt = f"{schema_context}
 
-User request: {user_text}
+User question: {user_text}
 
-REMINDER: The table is called `camps`. Start by running: SELECT * FROM `camps` LIMIT 1; to confirm it exists, then answer the user request."""
+SQL query:"
 
     try:
-        response = agent.invoke({"messages": [{"role": "user", "content": grounded_message}]})
-        return response["messages"][-1].content
+        sql_response = llm.invoke(sql_prompt)
+        sql_query = sql_response.content.strip()
+        # Clean up any markdown formatting the LLM might add
+        sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+
+        # Step 2: Execute the generated SQL directly
+        engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
+        with engine.connect() as conn:
+            result = conn.execute(text(sql_query))
+            rows = result.fetchall()
+            columns = result.keys()
+
+            if not rows:
+                return "No camps found matching your criteria in our database."
+
+            # Step 3: Format results into readable text
+            camp_list = []
+            for row in rows:
+                row_dict = dict(zip(columns, row))
+                name = row_dict.get("camp_name", "Unknown")
+                location = row_dict.get("location", "")
+                listing_class = "Day Camp" if row_dict.get("listingClass") == "single" else "Overnight Camp"
+                tier = row_dict.get("eListingType", "")
+                url = row_dict.get("prettyURL", "")
+                camp_list.append(f"- {name} ({listing_class}, {location}) [{tier}]")
+
+            header = f"Found {len(rows)} camp(s) matching your search:
+"
+            return header + "
+".join(camp_list)
+
     except Exception as e:
-        return f"Database query error: {str(e)[:200]}"
+        return f"Database query error: {str(e)[:300]}"
 
 # ═════════════════════════════════════════════
 # CASE 2: VECTOR SEARCH
