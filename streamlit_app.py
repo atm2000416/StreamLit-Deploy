@@ -219,7 +219,7 @@ def classify_query(user_text):
 # ═════════════════════════════════════════════
 # CASE 1: SQL AGENT
 # ═════════════════════════════════════════════
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1)
 def run_case1(user_text, _config):
     """Query camps database using keyword extraction + hardcoded SQL templates"""
     from sqlalchemy import create_engine, text
@@ -325,7 +325,8 @@ def run_case1(user_text, _config):
             return f"Found {len(rows)} camp(s){filter_summary}:\n" + "\n".join(camp_list)
 
     except Exception as e:
-        return f"Database query error: {str(e)[:300]}"
+        sql_info = sql_query if "sql_query" in locals() else "SQL not generated"
+        return f"Database query error: {str(e)[:500]}\n\nSQL attempted: {sql_info}"
 
 # ═════════════════════════════════════════════
 # CASE 2: VECTOR SEARCH
