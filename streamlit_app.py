@@ -236,8 +236,9 @@ def run_case1(user_text, _config):
     }
     city_to_region = {
         'ottawa':      'Ottawa Region',
-        'toronto':     'City of Toronto',
-        'vancouver':   'British Columbia',
+        'toronto':     'Toronto',
+        'vancouver':   'Lower Mainland',
+        'victoria':    'Vancouver Island',
         'hamilton':    'City of Hamilton',
         'waterloo':    'Waterloo - Wellington',
         'kingston':    'Kingston - Prince Edward',
@@ -246,6 +247,11 @@ def run_case1(user_text, _config):
         'edmonton':    'Edmonton',
         'montreal':    'Montreal',
         'halifax':     'Halifax',
+        'winnipeg':    'Manitoba',
+        'saskatoon':   'Saskatchewan',
+        'regina':      'Saskatchewan',
+        'moncton':     'New Brunswick',
+        'fredericton': 'New Brunswick',
     }
     provinces = {
         'british columbia': 'British Columbia', 'bc': 'British Columbia',
