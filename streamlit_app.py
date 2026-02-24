@@ -260,7 +260,7 @@ def run_case1(user_text, _config):
         'academic': [314, 129],
     }
 
-    # Province filter — includes major cities mapped to their province
+    # City to province mapping
     city_to_province = {
         'vancouver': 'British Columbia', 'victoria': 'British Columbia',
         'kelowna': 'British Columbia', 'surrey': 'British Columbia',
@@ -271,6 +271,20 @@ def run_case1(user_text, _config):
         'winnipeg': 'Manitoba', 'saskatoon': 'Saskatchewan',
         'regina': 'Saskatchewan', 'halifax': 'Nova Scotia',
         'fredericton': 'New Brunswick', 'moncton': 'New Brunswick',
+    }
+
+    # City/region to specific mapping MIDs for more precise filtering
+    city_to_mids = {
+        'ottawa': [172, 173, 174, 175, 176, 177, 341, 6280, 6281],
+        'toronto': [100, 6084, 6085, 6086, 6087, 6088, 6089, 6090, 6091, 6092, 6093, 6094, 6095, 6096, 6097, 6098],
+        'vancouver': [281, 340, 1030, 1215],
+        'calgary': [390, 391, 392],
+        'edmonton': [400, 401, 402],
+        'montreal': [285, 286, 287, 288, 289, 290, 291],
+        'hamilton': [62, 63, 64],
+        'waterloo': [44, 45, 46],
+        'kingston': [191, 192, 193],
+        'barrie': [131, 132, 133],
     }
     provinces = {
         'british columbia': 'British Columbia', 'bc': 'British Columbia',
@@ -283,6 +297,7 @@ def run_case1(user_text, _config):
         'nunavut': 'Nunavut'
     }
     location_filter = None
+    city_mids = []
     for keyword, value in provinces.items():
         if keyword in text_lower:
             location_filter = value
@@ -291,6 +306,13 @@ def run_case1(user_text, _config):
         for city, province in city_to_province.items():
             if city in text_lower:
                 location_filter = province
+                city_mids = city_to_mids.get(city, [])
+                break
+    else:
+        # Also check for specific city within a named province
+        for city, mids in city_to_mids.items():
+            if city in text_lower:
+                city_mids = mids
                 break
 
     # Specialty codes from keywords
@@ -326,7 +348,7 @@ def run_case1(user_text, _config):
     elif 'day camp' in text_lower:
         style_filter = 'single'
 
-    def build_query(province, codes, age, cost, style, limit=10):
+    def build_query(province, codes, age, cost, style, limit=10, mids=None):
         conditions = ["c.status = 1", "s.specialty != 0"]
         params = {}
 
@@ -351,6 +373,11 @@ def run_case1(user_text, _config):
         if province:
             conditions.append("m.`grouping` = :province")
             params['province'] = province
+            if mids:
+                mid_placeholders = ", ".join([f":mid{i}" for i, _ in enumerate(mids)])
+                conditions.append(f"m.mid IN ({mid_placeholders})")
+                for i, mid in enumerate(mids):
+                    params[f'mid{i}'] = mid
             from_clause = """camp_directory.camps c
                 JOIN camp_directory.sessions s ON s.cid = c.cid
                 JOIN camp_directory.extra_locations el ON el.cid = c.cid
@@ -404,7 +431,7 @@ def run_case1(user_text, _config):
         with engine.connect() as conn:
 
             # Try 1: Full search
-            sql, params = build_query(location_filter, specialty_codes, age_filter, cost_filter, style_filter)
+            sql, params = build_query(location_filter, specialty_codes, age_filter, cost_filter, style_filter, mids=city_mids)
             result = conn.execute(text(sql), params)
             rows = result.fetchall()
             col_names = list(result.keys())
@@ -421,7 +448,7 @@ def run_case1(user_text, _config):
 
             # Try 2: Drop cost filter
             if cost_filter:
-                sql, params = build_query(location_filter, specialty_codes, age_filter, None, style_filter)
+                sql, params = build_query(location_filter, specialty_codes, age_filter, None, style_filter, mids=city_mids)
                 result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 col_names = list(result.keys())
@@ -431,7 +458,7 @@ def run_case1(user_text, _config):
 
             # Try 3: Drop age + cost, keep specialty + province
             if age_filter or cost_filter:
-                sql, params = build_query(location_filter, specialty_codes, None, None, style_filter)
+                sql, params = build_query(location_filter, specialty_codes, None, None, style_filter, mids=city_mids)
                 result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 col_names = list(result.keys())
@@ -441,7 +468,7 @@ def run_case1(user_text, _config):
 
             # Try 4: Province only, no specialty
             if specialty_codes and location_filter:
-                sql, params = build_query(location_filter, [], None, None, style_filter)
+                sql, params = build_query(location_filter, [], None, None, style_filter, mids=city_mids)
                 result = conn.execute(text(sql), params)
                 rows = result.fetchall()
                 col_names = list(result.keys())
@@ -664,24 +691,27 @@ def find_best_alternative(non_client_name, prefs, client_camps, already_suggeste
 # ═════════════════════════════════════════════
 # MAIN QUERY PROCESSOR
 # ═════════════════════════════════════════════
-def process_query(user_text, config, client_camps):
+def process_query(user_text, config, client_camps, chat_history=None):
     """Main query processing pipeline"""
     start_time = time.time()
-    
-    case = classify_query(user_text)
-    
-    if case == "Case1":
-        answer = run_case1(user_text, config)
-    elif case == "Case2":
-        answer = run_case2(user_text, config)
+
+    # Combine recent user messages for better context across conversation turns
+    if chat_history:
+        recent_user_msgs = [m["content"] for m in chat_history[-6:] if m["role"] == "user"]
+        combined_text = " ".join(recent_user_msgs + [user_text])
     else:
-        ans1 = run_case1(user_text, config)
-        ans2 = run_case2(user_text, config)
-        answer = f"{ans1}\n\n{ans2}"
-    
-    # Skip URL injection since run_case1 builds URLs directly from database
+        combined_text = user_text
+
+    case = classify_query(combined_text)
+
+    if case == "Case1":
+        answer = run_case1(combined_text, config)
+    elif case == "Case2":
+        answer = run_case2(combined_text, config)
+    else:
+        answer = run_case1(combined_text, config)
+
     elapsed = time.time() - start_time
-    
     return answer, elapsed
 
 # ═════════════════════════════════════════════
@@ -749,7 +779,7 @@ if prompt := st.chat_input("Search member camps..."):
     
     with st.chat_message("assistant"):
         try:
-            response, elapsed = process_query(prompt, config, client_camps)
+            response, elapsed = process_query(prompt, config, client_camps, chat_history=st.session_state.messages)
             st.markdown(response)
             if elapsed < 3:
                 st.caption(f"⚡ {elapsed:.1f}s • Member camps only")
