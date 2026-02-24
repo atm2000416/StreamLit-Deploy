@@ -221,74 +221,60 @@ def classify_query(user_text):
 # ═════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def run_case1(user_text, _config):
-    """Query database for structured data using direct SQL generation"""
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    from langchain_community.utilities import SQLDatabase
+    """Query database using direct Gemini API for SQL generation + SQLAlchemy for execution"""
     from sqlalchemy import create_engine, text
 
-    os.environ["GOOGLE_API_KEY"] = _config["GEMINI_API_KEY"]
+    system_prompt = """You are a MySQL expert. Generate a single valid MySQL SELECT query.
 
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=_config["GEMINI_API_KEY"])
-
-    # Step 1: Use LLM to generate a SQL query from the user's question
-    schema_context = """
-You are a SQL expert. Generate a single MySQL SELECT query for the `camps` table in the `camp_directory` database.
-
-Table: camps
+Table: camps (in database: camp_directory)
 Columns:
 - cid: unique id
-- camp_name: name of the camp (VARCHAR)
-- location: region or province (VARCHAR)
-- eListingType: membership tier - values are 'bronze', 'silver', 'gold' (VARCHAR)
-- listingClass: camp style - 'single' means day camp, 'double' means overnight camp (VARCHAR)
-- prettyURL: url slug for the camp (VARCHAR)
+- camp_name: name of the camp
+- location: region or province
+- eListingType: membership tier (bronze, silver, gold)
+- listingClass: single=day camp, double=overnight camp
+- prettyURL: url slug
 - Lat, Lon: coordinates
 - status: 0 or 1
-- mod_date: last modified timestamp
 
 Rules:
-- Only use columns listed above
-- Always use LIMIT 10
+- ONLY output the raw SQL query, no markdown, no backticks, no explanation
+- Always include LIMIT 10
 - Use LIKE '%value%' for text searches
-- Return ONLY the raw SQL query, no explanation, no markdown, no backticks
-"""
-    sql_prompt = f"{schema_context}
+- Only use the columns listed above"""
 
-User question: {user_text}
-
-SQL query:"
+    user_prompt = f"Write a MySQL query to answer this question: {user_text}"
 
     try:
-        sql_response = llm.invoke(sql_prompt)
-        sql_query = sql_response.content.strip()
-        # Clean up any markdown formatting the LLM might add
+        # Use call_gemini directly - no LangChain, no recursion risk
+        sql_query = call_gemini(system_prompt, user_prompt, _config["GEMINI_API_KEY"], max_tokens=256)
+
+        if not sql_query:
+            return "Could not generate a database query for your request."
+
+        # Clean any markdown the LLM snuck in
         sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
 
-        # Step 2: Execute the generated SQL directly
+        # Execute directly with SQLAlchemy
         engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
             result = conn.execute(text(sql_query))
             rows = result.fetchall()
-            columns = result.keys()
+            col_names = list(result.keys())
 
             if not rows:
                 return "No camps found matching your criteria in our database."
 
-            # Step 3: Format results into readable text
             camp_list = []
             for row in rows:
-                row_dict = dict(zip(columns, row))
+                row_dict = dict(zip(col_names, row))
                 name = row_dict.get("camp_name", "Unknown")
-                location = row_dict.get("location", "")
-                listing_class = "Day Camp" if row_dict.get("listingClass") == "single" else "Overnight Camp"
+                location = row_dict.get("location", "N/A")
+                style = "Day Camp" if row_dict.get("listingClass") == "single" else "Overnight Camp"
                 tier = row_dict.get("eListingType", "")
-                url = row_dict.get("prettyURL", "")
-                camp_list.append(f"- {name} ({listing_class}, {location}) [{tier}]")
+                camp_list.append(f"- {name} ({style}, {location}) [{tier}]")
 
-            header = f"Found {len(rows)} camp(s) matching your search:
-"
-            return header + "
-".join(camp_list)
+            return f"Found {len(rows)} camp(s):\n" + "\n".join(camp_list)
 
     except Exception as e:
         return f"Database query error: {str(e)[:300]}"
@@ -296,6 +282,7 @@ SQL query:"
 # ═════════════════════════════════════════════
 # CASE 2: VECTOR SEARCH
 # ═════════════════════════════════════════════
+
 @st.cache_data(ttl=300)
 def run_case2(user_text, _config):
     """Search vector database for descriptive content"""
