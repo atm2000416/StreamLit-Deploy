@@ -359,7 +359,7 @@ def run_case1(user_text, _config):
 
         if codes:
             regex = "|".join(str(c) for c in codes)
-            conditions.append("specialties REGEXP :spec_regex OR program_names REGEXP :prog_regex")
+            conditions.append("(specialties REGEXP :spec_regex OR program_names REGEXP :prog_regex)")
             kw_list = [kw for kw, c in specialty_map.items() if any(x in codes for x in c)]
             prog_regex = "|".join(set(kw_list[:10]))
             params['spec_regex'] = regex
