@@ -258,10 +258,17 @@ def run_case1(user_text, _config):
         "9. Return real camp_name values from query results, never make up camp names."
     )
 
-    agent = create_react_agent(llm, tools, prompt=prompt)
+    agent = create_react_agent(llm, tools)
     
+    # Inject schema context directly into the user message so the agent cannot ignore it
+    grounded_message = f"""{prompt}
+
+User request: {user_text}
+
+REMINDER: The table is called `camps`. Start by running: SELECT * FROM `camps` LIMIT 1; to confirm it exists, then answer the user request."""
+
     try:
-        response = agent.invoke({"messages": [{"role": "user", "content": user_text}]})
+        response = agent.invoke({"messages": [{"role": "user", "content": grounded_message}]})
         return response["messages"][-1].content
     except Exception as e:
         return f"Database query error: {str(e)[:200]}"
