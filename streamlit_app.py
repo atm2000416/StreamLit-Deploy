@@ -436,6 +436,10 @@ def run_case1(user_text, _config):
             rows = result.fetchall()
             col_names = list(result.keys())
 
+            # DEBUG — remove after testing
+            import json
+            debug_info = f"\n\n🔍 DEBUG: sql={sql[:200]} | params={json.dumps({k: str(v) for k,v in params.items()})}"
+
             if rows:
                 camps = format_rows(rows, col_names)
                 filters = list(filter(None, [
@@ -446,7 +450,7 @@ def run_case1(user_text, _config):
                     f"under ${cost_filter}" if cost_filter else None,
                 ]))
                 summary = f" (filters: {', '.join(filters)})" if filters else ""
-                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps)
+                return f"Found {len(camps)} camp(s){summary}:\n" + "\n".join(camps) + debug_info
 
             # Try 2: Drop cost filter only
             if cost_filter:
