@@ -197,569 +197,311 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
         pass
     return ""
 
-# ═════════════════════════════════════════════
-# QUERY CLASSIFICATION
-# ═════════════════════════════════════════════
-def classify_query(user_text):
-    """Route queries — default to Case1 (SQL) for most camp searches"""
-    text_lower = user_text.lower()
-
-    # Case2: only for detailed descriptive questions about a specific camp
-    case2_keywords = ['describe', 'tell me about', 'amenities', 'facilities', 'what is it like']
-    if any(kw in text_lower for kw in case2_keywords):
-        return "Case2"
-
-    # Everything else goes to Case1 (SQL keyword search)
-    return "Case1"
 
 # ═════════════════════════════════════════════
-# CASE 1: SQL AGENT
+# CORE RAG PIPELINE
 # ═════════════════════════════════════════════
-def run_case1(user_text, _config):
-    """Query camps_clean — single denormalized table, no joins needed"""
+
+def extract_filters(user_text, api_key):
+    """Use Gemini to extract structured search filters from natural language"""
+    system = """You are a camp search assistant. Extract search filters from the user message.
+Return ONLY a valid JSON object with these fields (use null if not mentioned):
+{
+  "province": "full province name or null",
+  "region": "city or region name or null",
+  "activity": "main activity type or null",
+  "age": integer or null,
+  "max_cost": integer or null,
+  "style": "day" or "overnight" or null,
+  "name": "user first name if mentioned or null"
+}
+Province must be one of: British Columbia, Alberta, Ontario, Quebec, Manitoba, Saskatchewan, Nova Scotia, New Brunswick, Prince Edward Island, Newfoundland and Labrador.
+For cities, set region to the city name and infer the province.
+Examples:
+- "etobicoke" → province: "Ontario", region: "Toronto"
+- "nepean" → province: "Ontario", region: "Ottawa Region"  
+- "debate camps" → activity: "debate"
+- "hockey" → activity: "hockey"
+- "under $500" → max_cost: 500
+- "10 year old" → age: 10
+- "teens" → age: 15"""
+
+    result = call_gemini(system, user_text, api_key, max_tokens=200)
+    import json, re
+    try:
+        # Strip markdown code fences if present
+        clean = re.sub(r'```json|```', '', result).strip()
+        return json.loads(clean)
+    except:
+        return {}
+
+
+def search_camps(filters, config, limit=8):
+    """Query camps_clean using extracted filters — simple WHERE clauses, no joins"""
     from sqlalchemy import create_engine, text
-    import re
 
-    text_lower = user_text.lower()
-
-    # ── Specialty code mapping ─────────────────────────────────────────────
-    specialty_map = {
-        'stem':        [268, 18, 50, 67, 160, 180],
-        'science':     [268, 50, 18],
-        'technology':  [268, 18, 180],
-        'coding':      [18, 180, 268],
-        'programming': [18, 180, 268],
-        'computer':    [18, 180, 268],
-        'robotics':    [67, 268, 160],
-        'engineering': [160, 268, 50],
-        'math':        [129, 268, 18],
-        'arts':        [9, 172],
-        'art':         [9, 172],
-        'music':       [37],
-        'dance':       [22],
-        'theatre':     [172],
-        'drama':       [172],
-        'film':        [172],
-        'soccer':      [54],
-        'basketball':  [12],
-        'tennis':      [66],
-        'equestrian':  [30],
-        'riding':      [30],
-        'horse':       [30],
-        'cooking':     [133],
-        'chef':        [133],
-        'aerospace':   [50],
-        'leadership':  [79, 181],
-        'outdoor':     [181, 79],
-        'adventure':   [181, 79],
-        'hockey':      [188],
-        'sports':      [188, 12, 54, 66],
-        'french':      [314],
-        'language':    [314],
-        'academic':    [314, 129],
-        'sailing':     [181],
-        'canoe':       [181],
-        'gymnastics':  [22],
-        'swim':        [181],
-        'golf':        [188],
-        'traditional': [181],
+    # Region mapping for common cities/districts
+    region_map = {
+        'toronto': 'Toronto', 'etobicoke': 'Toronto', 'scarborough': 'Toronto',
+        'north york': 'Toronto', 'east york': 'Toronto',
+        'thornhill': 'York', 'richmond hill': 'York', 'markham': 'York',
+        'oakville': 'Halton - Peel', 'mississauga': 'Halton - Peel',
+        'brampton': 'Halton - Peel', 'burlington': 'Halton - Peel',
+        'ajax': 'Durham', 'pickering': 'Durham', 'oshawa': 'Durham', 'whitby': 'Durham',
+        'ottawa': 'Ottawa Region', 'nepean': 'Ottawa Region',
+        'kanata': 'Ottawa Region', 'gloucester': 'Ottawa Region',
+        'vancouver': 'Lower Mainland', 'burnaby': 'Lower Mainland',
+        'surrey': 'Lower Mainland', 'richmond': 'Lower Mainland',
+        'victoria': 'Vancouver Island', 'kelowna': 'Okanagan',
+        'calgary': 'Calgary', 'edmonton': 'Edmonton',
+        'winnipeg': 'Manitoba', 'montreal': 'Montreal',
+        'halifax': 'Halifax', 'hamilton': 'City of Hamilton',
+        'waterloo': 'Waterloo - Wellington', 'kitchener': 'Waterloo - Wellington',
+        'kingston': 'Kingston - Prince Edward', 'barrie': 'Barrie - Orillia - Midland',
     }
-
-    # ── Province detection ─────────────────────────────────────────────────
-    provinces = {
-        'british columbia': 'British Columbia', 'bc': 'British Columbia',
-        'ontario': 'Ontario', 'quebec': 'Quebec', 'alberta': 'Alberta',
-        'nova scotia': 'Nova Scotia', 'new brunswick': 'New Brunswick',
-        'manitoba': 'Manitoba', 'saskatchewan': 'Saskatchewan',
-        'newfoundland': 'Newfoundland and Labrador',
-        'prince edward island': 'Prince Edward Island', 'pei': 'Prince Edward Island',
-        'yukon': 'Yukon', 'northwest territories': 'Northwest Territories',
-        'nunavut': 'Nunavut'
-    }
-    city_to_province = {
-        'vancouver': 'British Columbia', 'victoria': 'British Columbia',
-        'kelowna': 'British Columbia', 'surrey': 'British Columbia',
-        'toronto': 'Ontario', 'ottawa': 'Ontario', 'hamilton': 'Ontario',
-        'mississauga': 'Ontario', 'brampton': 'Ontario', 'london': 'Ontario',
-        'waterloo': 'Ontario', 'kingston': 'Ontario', 'barrie': 'Ontario',
-        'montreal': 'Quebec', 'quebec city': 'Quebec', 'laval': 'Quebec',
+    city_province_map = {
+        'toronto': 'Ontario', 'etobicoke': 'Ontario', 'scarborough': 'Ontario',
+        'north york': 'Ontario', 'east york': 'Ontario', 'thornhill': 'Ontario',
+        'richmond hill': 'Ontario', 'markham': 'Ontario', 'oakville': 'Ontario',
+        'mississauga': 'Ontario', 'brampton': 'Ontario', 'burlington': 'Ontario',
+        'ajax': 'Ontario', 'pickering': 'Ontario', 'oshawa': 'Ontario',
+        'whitby': 'Ontario', 'ottawa': 'Ontario', 'nepean': 'Ontario',
+        'kanata': 'Ontario', 'gloucester': 'Ontario', 'hamilton': 'Ontario',
+        'waterloo': 'Ontario', 'kitchener': 'Ontario', 'kingston': 'Ontario',
+        'barrie': 'Ontario', 'london': 'Ontario',
+        'vancouver': 'British Columbia', 'burnaby': 'British Columbia',
+        'surrey': 'British Columbia', 'richmond': 'British Columbia',
+        'victoria': 'British Columbia', 'kelowna': 'British Columbia',
         'calgary': 'Alberta', 'edmonton': 'Alberta',
-        'winnipeg': 'Manitoba', 'saskatoon': 'Saskatchewan',
-        'regina': 'Saskatchewan', 'halifax': 'Nova Scotia',
-        'fredericton': 'New Brunswick', 'moncton': 'New Brunswick',
-    }
-    city_to_region = {
-        'ottawa':      'Ottawa Region',
-        'toronto':     'Toronto',
-        'vancouver':   'Lower Mainland',
-        'victoria':    'Vancouver Island',
-        'hamilton':    'City of Hamilton',
-        'waterloo':    'Waterloo - Wellington',
-        'kingston':    'Kingston - Prince Edward',
-        'barrie':      'Barrie - Orillia - Midland',
-        'calgary':     'Calgary',
-        'edmonton':    'Edmonton',
-        'montreal':    'Montreal',
-        'halifax':     'Halifax',
-        'winnipeg':    'Manitoba',
-        'saskatoon':   'Saskatchewan',
-        'regina':      'Saskatchewan',
-        'moncton':     'New Brunswick',
-        'fredericton': 'New Brunswick',
+        'winnipeg': 'Manitoba', 'montreal': 'Quebec',
+        'halifax': 'Nova Scotia',
     }
 
-    location_filter = None
-    region_filter   = None
-    for kw, val in provinces.items():
-        if kw in text_lower:
-            location_filter = val
-            break
-    for city, province in city_to_province.items():
-        if city in text_lower:
-            if not location_filter:
-                location_filter = province
-            region_filter = city_to_region.get(city)
-            break
+    province = filters.get('province')
+    region   = filters.get('region', '')
+    activity = filters.get('activity', '')
+    age      = filters.get('age')
+    max_cost = filters.get('max_cost')
+    style    = filters.get('style')
 
-    # ── Specialty codes ────────────────────────────────────────────────────
-    specialty_codes = list(set(
-        code for kw, codes in specialty_map.items()
-        if kw in text_lower for code in codes
-    ))
-    # Only include keywords user actually typed (for messages)
-    user_keywords = [kw for kw in specialty_map if kw in text_lower]
+    # Resolve region/city to province if not set
+    region_lower = (region or '').lower().strip()
+    if not province and region_lower in city_province_map:
+        province = city_province_map[region_lower]
+    resolved_region = region_map.get(region_lower, region)
 
-    # ── Age filter ─────────────────────────────────────────────────────────
-    age_filter  = None
-    age_match   = re.search(r'(\d+)\s*(?:year|yr|yo|-year)', text_lower)
-    if age_match:
-        age_filter = int(age_match.group(1))
-    elif 'teenager' in text_lower or 'teen' in text_lower: age_filter = 14
-    elif 'toddler' in text_lower:                           age_filter = 4
-    elif 'child' in text_lower or 'kid' in text_lower:     age_filter = 8
+    conditions = ["status = 1", "province != 'Unknown'"]
+    params = {}
 
-    # ── Cost filter ────────────────────────────────────────────────────────
-    cost_filter = None
-    cost_match  = re.search(r'\$(\s*\d+)', text_lower)
-    if cost_match:
-        cost_filter = int(cost_match.group(1).strip())
+    if province:
+        conditions.append("province = :province")
+        params['province'] = province
 
-    # ── Style filter ───────────────────────────────────────────────────────
-    style_filter = None
-    if 'overnight' in text_lower or 'sleepaway' in text_lower:
-        style_filter = 'overnight'
-    elif 'day camp' in text_lower:
-        style_filter = 'day'
+    if resolved_region:
+        conditions.append("region LIKE :region")
+        params['region'] = f"%{resolved_region}%"
 
-    # ── Build query using FIND_IN_SET (exact code matching) ────────────────
-    def build_query(province, region, codes, age, cost, style, limit=10):
-        conditions = ["status = 1"]
-        params     = {}
+    if activity:
+        conditions.append(
+            "(activities LIKE :act OR program_names LIKE :act2 OR camp_name LIKE :act3)"
+        )
+        params['act']  = f"%{activity}%"
+        params['act2'] = f"%{activity}%"
+        params['act3'] = f"%{activity}%"
 
-        if province:
-            conditions.append("province = :province")
-            params['province'] = province
+    if age:
+        conditions.append("age_min <= :age AND age_max >= :age")
+        params['age'] = age
 
-        if region:
-            conditions.append("region LIKE :region")
-            params['region'] = f"%{region}%"
+    if max_cost:
+        conditions.append("(cost_min <= :cost OR cost_min IS NULL)")
+        params['cost'] = max_cost
 
-        if codes:
-            # FIND_IN_SET for exact matching — no false positives
-            code_conditions = " OR ".join([f"FIND_IN_SET({c}, specialty_codes)" for c in codes])
-            conditions.append(f"({code_conditions})")
+    if style:
+        conditions.append("camp_style = :style")
+        params['style'] = style
 
-        if age:
-            conditions.append("age_min <= :age AND age_max >= :age")
-            params['age'] = age
-
-        if cost:
-            conditions.append("cost_min <= :cost")
-            params['cost'] = cost
-
-        if style:
-            conditions.append("camp_style = :style")
-            params['style'] = style
-
-        where = " AND ".join(conditions)
-        sql   = f"""SELECT DISTINCT cid, camp_name, province, region,
-                camp_style, listing_tier, camp_url,
-                age_min, age_max, cost_min, cost_max, activities
-            FROM camp_directory.camps_clean
-            WHERE {where}
-            ORDER BY FIELD(listing_tier, 'gold', 'silver', 'bronze'), camp_name
-            LIMIT {limit}"""
-        return sql, params
-
-    def format_rows(rows, col_names):
-        camp_list = []
-        seen      = set()
-        for row in rows:
-            d    = dict(zip(col_names, row))
-            name = d.get("camp_name", "Unknown")
-            if name in seen: continue
-            seen.add(name)
-            province  = d.get("province") or ""
-            region    = d.get("region")   or ""
-            loc_str   = f"{region}, {province}".strip(", ") if (region or province) else "N/A"
-            style     = "Day Camp" if d.get("camp_style") == "day" else "Overnight Camp"
-            tier      = d.get("listing_tier", "")
-            url       = d.get("camp_url", "")
-            age_from  = d.get("age_min",  "")
-            age_to    = d.get("age_max",  "")
-            cost_from = d.get("cost_min", "")
-            cost_to   = d.get("cost_max", "")
-            acts      = d.get("activities", "")
-            age_str   = f"Ages {age_from}-{age_to}" if age_from and age_to else ""
-            cost_str  = f"${cost_from}-${cost_to}/wk" if cost_from and cost_to else (f"${cost_from}/wk" if cost_from else "")
-            details   = " | ".join(filter(None, [age_str, cost_str, acts]))
-            if url:
-                slug = url.replace("https://www.camps.ca/", "")
-                line = f"- **{name}** ([camps.ca/{slug}]({url})) — {style}, {loc_str} [{tier}]"
-            else:
-                line = f"- **{name}** — {style}, {loc_str} [{tier}]"
-            if details: line += f" | {details}"
-            camp_list.append(line)
-        return camp_list
+    where = " AND ".join(conditions)
+    sql = f"""SELECT DISTINCT cid, camp_name, province, region,
+            camp_style, listing_tier, camp_url,
+            age_min, age_max, cost_min, cost_max, activities, description
+        FROM camp_directory.camps_clean
+        WHERE {where}
+        ORDER BY FIELD(listing_tier, 'gold', 'silver', 'bronze'), camp_name
+        LIMIT {limit}"""
 
     try:
-        engine = create_engine(get_db_uri(_config, _config["DB_CAMP_DIR"]), pool_pre_ping=True)
+        engine = create_engine(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
+            result = conn.execute(text(sql), params)
+            rows   = result.fetchall()
+            cols   = list(result.keys())
 
-            def run_q(province, region, codes, age, cost, style):
-                sql, params = build_query(province, region, codes, age, cost, style)
-                result      = conn.execute(text(sql), params)
-                return result.fetchall(), list(result.keys())
-
-            # Try 1: Full search
-            rows, cols = run_q(location_filter, region_filter, specialty_codes, age_filter, cost_filter, style_filter)
             if rows:
-                camps = format_rows(rows, cols)
-                notes = []
-                if style_filter == 'day'       and all('Day Camp'      in c for c in camps): notes.append("All results are day camps.")
-                if style_filter == 'overnight'  and all('Overnight Camp' in c for c in camps): notes.append("All results are overnight camps.")
-                if age_filter:   notes.append(f"Results filtered for age {age_filter}. Confirm age requirements with each camp.")
-                note_str = "\n\n💡 " + " ".join(notes) if notes else ""
+                return [dict(zip(cols, row)) for row in rows], province, resolved_region, None
 
-                name_match = re.search(r'my name is (\w+)', text_lower)
-                greeting   = f"Great news, **{name_match.group(1).title()}**! " if name_match else ""
-                act_label  = " and ".join(user_keywords[:2]) if user_keywords else ""
-                loc_label  = region_filter or location_filter or ""
-                if greeting and act_label and loc_label:
-                    intro = f"{greeting}Here are the best **{act_label}** camps in **{loc_label}**:\n\n"
-                else:
-                    filters = list(filter(None, [
-                        location_filter, region_filter,
-                        ", ".join(user_keywords[:3]) if user_keywords else None,
-                        f"age {age_filter}" if age_filter else None,
-                        f"under ${cost_filter}" if cost_filter else None,
-                    ]))
-                    summary = f" (filters: {', '.join(filters)})" if filters else ""
-                    intro   = f"Found {len(camps)} camp(s){summary}:\n"
-                return intro + "\n".join(camps) + note_str
+            # Fallback 1: drop region
+            if resolved_region and province:
+                conditions2 = [c for c in conditions if 'region' not in c]
+                sql2 = f"""SELECT DISTINCT cid, camp_name, province, region,
+                        camp_style, listing_tier, camp_url,
+                        age_min, age_max, cost_min, cost_max, activities, description
+                    FROM camp_directory.camps_clean
+                    WHERE {' AND '.join(conditions2)}
+                    ORDER BY FIELD(listing_tier,'gold','silver','bronze')
+                    LIMIT {limit}"""
+                params2 = {k:v for k,v in params.items() if k != 'region'}
+                result2 = conn.execute(text(sql2), params2)
+                rows2   = result2.fetchall()
+                if rows2:
+                    return [dict(zip(list(result2.keys()), row)) for row in rows2], province, resolved_region, 'no_region'
 
-            # Try 2: Drop cost
-            if cost_filter:
-                rows, cols = run_q(location_filter, region_filter, specialty_codes, age_filter, None, style_filter)
-                if rows:
-                    camps = format_rows(rows, cols)
-                    return f"No camps found under ${cost_filter}/week — here are the closest matches (check for early bird discounts):\n" + "\n".join(camps)
+            # Fallback 2: province only
+            if province:
+                result3 = conn.execute(text(
+                    "SELECT DISTINCT cid, camp_name, province, region, camp_style, listing_tier, "
+                    "camp_url, age_min, age_max, cost_min, cost_max, activities, description "
+                    "FROM camp_directory.camps_clean WHERE status=1 AND province=:p "
+                    "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT :lim"
+                ), {"p": province, "lim": limit})
+                rows3 = result3.fetchall()
+                if rows3:
+                    return [dict(zip(list(result3.keys()), row)) for row in rows3], province, resolved_region, 'no_activity'
 
-            # Try 3: Drop age + cost
-            if age_filter or cost_filter:
-                rows, cols = run_q(location_filter, region_filter, specialty_codes, None, None, style_filter)
-                if rows:
-                    camps = format_rows(rows, cols)
-                    return f"Here are matching camps in {region_filter or location_filter or 'Canada'} (age/cost filters relaxed):\n" + "\n".join(camps)
-
-            # Try 4: Drop region, keep province + specialty
-            if region_filter:
-                rows, cols = run_q(location_filter, None, specialty_codes, age_filter, None, style_filter)
-                if rows:
-                    camps = format_rows(rows, cols)
-                    return f"No camps found near {region_filter} — here are matches elsewhere in {location_filter}:\n" + "\n".join(camps)
-
-            # Try 5: Province only, drop specialty
-            if specialty_codes and location_filter:
-                rows, cols = run_q(location_filter, None, [], None, None, style_filter)
-                if rows:
-                    camps    = format_rows(rows, cols)
-                    kw_label = " and ".join(user_keywords[:2]) if user_keywords else "that type of"
-                    loc_label = region_filter or location_filter
-                    return (
-                        f"We don't currently have **{kw_label}** camps listed in **{loc_label}**. "
-                        f"Here are other camps nearby that may interest you:\n" + "\n".join(camps)
-                    )
-
-            # Try 6: Specialty Canada-wide (no province specified)
-            if specialty_codes and not location_filter:
-                rows, cols = run_q(None, None, specialty_codes, age_filter, None, style_filter)
-                if rows:
-                    camps = format_rows(rows, cols)
-                    return f"Here are matching camps across Canada:\n" + "\n".join(camps)
-
-            # Try 7: Top camps overall
-            result = conn.execute(text(
+            # Fallback 3: top camps
+            result4 = conn.execute(text(
                 "SELECT DISTINCT cid, camp_name, province, region, camp_style, listing_tier, "
-                "camp_url, age_min, age_max, cost_min, cost_max, activities "
-                "FROM camp_directory.camps_clean WHERE status = 1 "
-                "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT 10"
-            ))
-            rows = result.fetchall()
-            if rows:
-                camps = format_rows(rows, list(result.keys()))
-                return f"Here are our top member camps:\n" + "\n".join(camps)
-
-            return "No camps found in our database."
+                "camp_url, age_min, age_max, cost_min, cost_max, activities, description "
+                "FROM camp_directory.camps_clean WHERE status=1 AND province != 'Unknown' "
+                "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT :lim"
+            ), {"lim": limit})
+            rows4 = result4.fetchall()
+            return [dict(zip(list(result4.keys()), row)) for row in rows4], province, resolved_region, 'no_match'
 
     except Exception as e:
-        return f"Database query error: {str(e)[:500]}"
+        return [], province, resolved_region, f"error: {str(e)[:200]}"
 
-# ═════════════════════════════════════════════
-# CASE 2: VECTOR SEARCH
-# ═════════════════════════════════════════════
 
-def run_case2(user_text, _config):
-    """Search Pinecone vector DB directly — no LangChain wrapper"""
-    from pinecone import Pinecone
+def format_camp_context(camps):
+    """Format camp data as readable context for Gemini"""
+    lines = []
+    for c in camps:
+        name      = c.get('camp_name', '')
+        url       = c.get('camp_url', '')
+        province  = c.get('province', '')
+        region    = c.get('region', '')
+        style     = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
+        tier      = c.get('listing_tier', '')
+        age_min   = c.get('age_min', '')
+        age_max   = c.get('age_max', '')
+        cost_min  = c.get('cost_min', '')
+        cost_max  = c.get('cost_max', '')
+        activities= c.get('activities', '')
+        desc      = (c.get('description') or '')[:300]
 
-    try:
-        pc = Pinecone(api_key=_config["PINECONE_API_KEY"])
-        index = pc.Index(_config["INDEX_NAME"], host=_config["INDEX_HOST"])
+        age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else ""
+        cost_str = f"${cost_min}-${cost_max}/week" if cost_min and cost_max else ""
 
-        # Embed query directly via Pinecone inference API
-        embed_response = pc.inference.embed(
-            model="llama-text-embed-v2",
-            inputs=[user_text],
-            parameters={"input_type": "query", "truncate": "END"}
+        lines.append(
+            f"CAMP: {name}\n"
+            f"URL: {url}\n"
+            f"Location: {region}, {province}\n"
+            f"Type: {style} | Tier: {tier}\n"
+            f"Activities: {activities}\n"
+            f"{age_str} | {cost_str}\n"
+            f"Description: {desc}\n"
         )
-        query_vector = embed_response[0]["values"]
+    return "\n---\n".join(lines)
 
-        # Query Pinecone directly
-        results = index.query(
-            vector=query_vector,
-            top_k=5,
-            namespace=_config["NAMESPACE"],
-            include_metadata=True
-        )
 
-        matches = results.get("matches", [])
-        if not matches:
-            return ""
-
-        texts = []
-        for match in matches:
-            meta = match.get("metadata", {})
-            text = meta.get("text", "") or meta.get("content", "") or str(meta)
-            if text:
-                texts.append(text)
-
-        return "\n\n".join(texts) if texts else ""
-
-    except Exception as e:
-        return ""
-
-# ═════════════════════════════════════════════
-# CLIENT-ONLY FILTER WITH URL VALIDATION
-# ═════════════════════════════════════════════
-def filter_to_clients_only(text, client_camps, user_query):
-    """
-    Filter response to show only paying client camps
-    Add verified URLs beside each camp name
-    Replace non-client camps with best alternatives
-    """
-    patterns = [
-        r'\b(?:Camp\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
-        r'\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+Camp)\b',
-    ]
-    
-    mentioned_camps = set()
-    for pattern in patterns:
-        mentioned_camps.update(re.findall(pattern, text))
-    
-    if not mentioned_camps:
-        return text
-    
-    client_camps_found = {}
-    non_client_camps = []
-    
-    for camp in mentioned_camps:
-        key = camp.lower().strip()
-        if key in client_camps:
-            client_camps_found[camp] = client_camps[key]
-        else:
-            non_client_camps.append(camp)
-    
-    if non_client_camps:
-        prefs = extract_preferences(user_query)
-        
-        for non_client in non_client_camps:
-            alternative = find_best_alternative(non_client, prefs, client_camps, client_camps_found)
-            
-            if alternative:
-                friendly_url = alternative.get('friendly_url', alternative.get('url', ''))
-                text = text.replace(
-                    non_client,
-                    f"**{alternative['name']}** ([{friendly_url}]({alternative['url']})) _(recommended alternative)_"
-                )
-                client_camps_found[alternative['name']] = alternative
-    
-    for camp_name, camp_data in client_camps_found.items():
-        url = camp_data.get('url', '')
-        friendly_url = camp_data.get('friendly_url', url)
-        
-        if url:
-            formatted = f"**{camp_name}** ([{friendly_url}]({url}))"
-            text = re.sub(
-                rf'\b{re.escape(camp_name)}\b(?!\s*\()',
-                formatted,
-                text,
-                count=1
-            )
-    
-    return text
-
-def extract_preferences(user_query):
-    """Extract search preferences from user query"""
-    text_lower = user_query.lower()
-    
-    prefs = {
-        'location': None,
-        'type': None,
-        'age': None,
-        'price': None,
-        'day_overnight': None
-    }
-    
-    provinces = ['ontario', 'quebec', 'bc', 'british columbia', 'alberta', 
-                 'saskatchewan', 'manitoba', 'nova scotia', 'new brunswick']
-    for prov in provinces:
-        if prov in text_lower:
-            prefs['location'] = prov.title()
-            break
-    
-    types = ['stem', 'science', 'sports', 'arts', 'music', 'outdoor', 'adventure', 
-             'hockey', 'soccer', 'basketball', 'tech', 'coding', 'robotics']
-    for camp_type in types:
-        if camp_type in text_lower:
-            prefs['type'] = camp_type.upper() if camp_type == 'stem' else camp_type.title()
-            break
-    
-    age_match = re.search(r'(\d+)[\s-]?year', text_lower)
-    if age_match:
-        prefs['age'] = int(age_match.group(1))
-    
-    price_match = re.search(r'\$?(\d+)', text_lower)
-    if price_match and 'under' in text_lower:
-        prefs['price'] = int(price_match.group(1))
-    
-    if 'overnight' in text_lower or 'sleep' in text_lower:
-        prefs['day_overnight'] = 'overnight'
-    elif 'day camp' in text_lower or 'day' in text_lower:
-        prefs['day_overnight'] = 'day'
-    
-    return prefs
-
-def find_best_alternative(non_client_name, prefs, client_camps, already_suggested):
-    """Find best alternative client camp"""
-    def score_camp(camp_data):
-        score = 0
-        
-        if camp_data['name'] in already_suggested:
-            return -1
-        
-        if prefs.get('location') and camp_data.get('location'):
-            if prefs['location'].lower() in camp_data['location'].lower():
-                score += 50
-        
-        if prefs.get('type') and camp_data.get('type'):
-            if prefs['type'].lower() in camp_data['type'].lower():
-                score += 30
-        
-        if prefs.get('age') and camp_data.get('age_min') and camp_data.get('age_max'):
-            age = prefs['age']
-            if camp_data['age_min'] <= age <= camp_data['age_max']:
-                score += 20
-        
-        if prefs.get('price') and camp_data.get('price'):
-            if camp_data['price'] <= prefs['price']:
-                score += 15
-        
-        if prefs.get('day_overnight') and camp_data.get('day_overnight'):
-            if prefs['day_overnight'].lower() in str(camp_data['day_overnight']).lower():
-                score += 10
-        
-        return score
-    
-    scored_camps = []
-    for key, camp in client_camps.items():
-        score = score_camp(camp)
-        if score > 0:
-            scored_camps.append((score, camp))
-    
-    if scored_camps:
-        scored_camps.sort(reverse=True, key=lambda x: x[0])
-        return scored_camps[0][1]
-    
-    return None
-
-# ═════════════════════════════════════════════
-# MAIN QUERY PROCESSOR
-# ═════════════════════════════════════════════
 def process_query(user_text, config, client_camps, chat_history=None):
-    """Main query processing pipeline"""
-    start_time = time.time()
+    """Main RAG pipeline — Gemini extracts filters, SQL fetches camps, Gemini writes response"""
+    import time
+    start = time.time()
 
-    # Province/city detection on current message only
-    provinces_check = [
-        'british columbia', ' bc ', 'ontario', 'quebec', 'alberta',
-        'nova scotia', 'new brunswick', 'manitoba', 'saskatchewan',
-        'newfoundland', 'prince edward island', 'pei', 'yukon',
-    ]
-    cities_check = [
-        'vancouver', 'victoria', 'toronto', 'ottawa', 'hamilton',
-        'mississauga', 'montreal', 'calgary', 'edmonton', 'winnipeg',
-        'saskatoon', 'regina', 'halifax', 'fredericton', 'moncton',
-        'kelowna', 'surrey', 'brampton', 'london', 'barrie', 'waterloo',
-        'kingston', 'laval', 'quebec city',
-    ]
-    current_has_location = any(loc in user_text.lower() for loc in provinces_check + cities_check)
-
-    # Only treat as refinement if current message has NO new location
-    refinement_phrases = [
-        'from this list', 'from those', 'of those', 'of these',
-        'day camps only', 'overnight only', 'just day', 'just overnight',
-        'cheaper', 'more affordable', 'show more', 'any others',
-        'instead', 'in that area', 'same area',
-    ]
-    text_lower_check = user_text.lower()
-    is_refinement = (
-        not current_has_location and
-        any(phrase in text_lower_check for phrase in refinement_phrases)
-    )
-
+    # Step 1: Build combined context from chat history
     if chat_history:
-        if is_refinement:
-            # True refinement (no new location) — carry last 4 messages
-            recent_user_msgs = [m["content"] for m in chat_history[-4:] if m["role"] == "user"]
-        else:
-            # New location query — use current message only, no history bleed
-            recent_user_msgs = []
-        combined_text = " ".join(recent_user_msgs + [user_text])
+        recent = [m["content"] for m in chat_history[-3:] if m["role"] == "user"]
+        # Only include history if current message has no location (refinement)
+        location_words = ['ontario','british columbia','alberta','quebec','manitoba',
+                         'vancouver','toronto','ottawa','calgary','edmonton','winnipeg',
+                         'montreal','halifax','bc','etobicoke','nepean','scarborough']
+        has_location = any(w in user_text.lower() for w in location_words)
+        combined = " ".join(recent[:-1] + [user_text]) if not has_location else user_text
     else:
-        combined_text = user_text
+        combined = user_text
 
-    case = classify_query(combined_text)
+    # Step 2: Extract filters using Gemini
+    filters = extract_filters(combined, config["GEMINI_API_KEY"])
 
-    if case == "Case1":
-        answer = run_case1(combined_text, config)
-    elif case == "Case2":
-        answer = run_case2(combined_text, config)
+    # Step 3: Fetch matching camps from camps_clean
+    camps, province, region, fallback = search_camps(filters, config)
+
+    # Step 4: Build context string for Gemini
+    if not camps:
+        camp_context = "No camps found in the database matching these criteria."
     else:
-        answer = run_case1(combined_text, config)
+        camp_context = format_camp_context(camps)
 
-    elapsed = time.time() - start_time
-    return answer, elapsed
+    # Step 5: Build fallback note for Gemini
+    fallback_note = ""
+    if fallback == 'no_region':
+        fallback_note = f"Note: No camps found specifically near {region}, so showing results from {province} instead."
+    elif fallback == 'no_activity':
+        fallback_note = f"Note: No {filters.get('activity','matching')} camps found in {province}, showing other available camps."
+    elif fallback == 'no_match':
+        fallback_note = "Note: No exact matches found, showing top available member camps."
+
+    # Step 6: Gemini writes the full consultant response
+    user_name = filters.get('name', '')
+    greeting  = f"The user's name is {user_name}. Address them by name." if user_name else ""
+
+    system_prompt = f"""You are an expert Canadian camp consultant at camps.ca and ourkids.net.
+You help parents find the perfect verified member camp for their children.
+Be warm, helpful, and specific. Keep responses concise but valuable.
+{greeting}
+Always include the camp URL as a clickable markdown link like [Camp Name](url).
+Only recommend camps from the provided list — do not invent camps.
+If the search returned fallback results, acknowledge this honestly and suggest alternatives.
+All camps are verified members of camps.ca / ourkids.net network."""
+
+    user_prompt = f"""User request: {user_text}
+
+Extracted search criteria: {filters}
+
+{fallback_note}
+
+Available camps from our verified member database:
+{camp_context}
+
+Please provide a personalized consultant response recommending the best camps from this list.
+Include for each camp:
+- Camp name as a clickable link to their camps.ca page
+- Location (region, province)  
+- Why it fits the user's request
+- Age range and weekly cost
+- Day camp or overnight camp
+Maximum 5 recommendations. End with an offer to refine the search."""
+
+    response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=1000)
+
+    if not response:
+        # Fallback to simple formatted list if Gemini fails
+        lines = []
+        for c in camps[:5]:
+            url  = c.get('camp_url','')
+            name = c.get('camp_name','')
+            region_str = f"{c.get('region','')}, {c.get('province','')}"
+            style = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
+            tier  = c.get('listing_tier','')
+            acts  = c.get('activities','')
+            cost  = f"${c.get('cost_min','')}–${c.get('cost_max','')}/wk" if c.get('cost_min') else ""
+            lines.append(f"- **[{name}]({url})** — {style}, {region_str} [{tier}] | {acts} | {cost}")
+        response = f"Here are matching camps:\n" + "\n".join(lines)
+
+    elapsed = time.time() - start
+    return response, elapsed
+
 
 # ═════════════════════════════════════════════
 # STREAMLIT UI
