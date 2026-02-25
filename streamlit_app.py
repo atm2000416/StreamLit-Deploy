@@ -348,43 +348,59 @@ def search_camps(filters, config, limit=8):
             if rows:
                 return [dict(zip(cols, row)) for row in rows], province, resolved_region, None
 
-            # Fallback 1: drop region
-            if resolved_region and province:
-                conditions2 = [c for c in conditions if 'region' not in c]
-                sql2 = f"""SELECT DISTINCT cid, camp_name, province, region,
+            # Fallback 1: drop activity, keep region + province
+            if resolved_region and province and activity:
+                params_no_act = {k:v for k,v in params.items() if k not in ('act','act2','act3','act4')}
+                conds_no_act  = [c for c in conditions if 'activities' not in c and 'program_names' not in c and 'description' not in c and 'camp_name LIKE' not in c]
+                sql_f1 = f"""SELECT DISTINCT cid, camp_name, province, region,
                         camp_style, listing_tier, camp_url,
                         age_min, age_max, cost_min, cost_max, activities, description
                     FROM camp_directory.camps_clean
-                    WHERE {' AND '.join(conditions2)}
+                    WHERE {' AND '.join(conds_no_act)}
                     ORDER BY FIELD(listing_tier,'gold','silver','bronze')
                     LIMIT {limit}"""
-                params2 = {k:v for k,v in params.items() if k != 'region'}
-                result2 = conn.execute(text(sql2), params2)
-                rows2   = result2.fetchall()
-                if rows2:
-                    return [dict(zip(list(result2.keys()), row)) for row in rows2], province, resolved_region, 'no_region'
+                r1 = conn.execute(text(sql_f1), params_no_act)
+                rows1 = r1.fetchall()
+                if rows1:
+                    return [dict(zip(list(r1.keys()), row)) for row in rows1], province, resolved_region, 'no_activity_in_region'
 
-            # Fallback 2: province only
+            # Fallback 2: drop region, keep province + activity
+            if resolved_region and province:
+                params_no_reg = {k:v for k,v in params.items() if k != 'region'}
+                conds_no_reg  = [c for c in conditions if 'region' not in c]
+                sql_f2 = f"""SELECT DISTINCT cid, camp_name, province, region,
+                        camp_style, listing_tier, camp_url,
+                        age_min, age_max, cost_min, cost_max, activities, description
+                    FROM camp_directory.camps_clean
+                    WHERE {' AND '.join(conds_no_reg)}
+                    ORDER BY FIELD(listing_tier,'gold','silver','bronze')
+                    LIMIT {limit}"""
+                r2 = conn.execute(text(sql_f2), params_no_reg)
+                rows2 = r2.fetchall()
+                if rows2:
+                    return [dict(zip(list(r2.keys()), row)) for row in rows2], province, resolved_region, 'no_activity_in_province'
+
+            # Fallback 3: province only — drop both activity and region
             if province:
-                result3 = conn.execute(text(
+                r3 = conn.execute(text(
                     "SELECT DISTINCT cid, camp_name, province, region, camp_style, listing_tier, "
                     "camp_url, age_min, age_max, cost_min, cost_max, activities, description "
                     "FROM camp_directory.camps_clean WHERE status=1 AND province=:p "
                     "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT :lim"
                 ), {"p": province, "lim": limit})
-                rows3 = result3.fetchall()
+                rows3 = r3.fetchall()
                 if rows3:
-                    return [dict(zip(list(result3.keys()), row)) for row in rows3], province, resolved_region, 'no_activity'
+                    return [dict(zip(list(r3.keys()), row)) for row in rows3], province, resolved_region, 'province_only'
 
-            # Fallback 3: top camps
-            result4 = conn.execute(text(
+            # Fallback 4: top camps overall
+            r4 = conn.execute(text(
                 "SELECT DISTINCT cid, camp_name, province, region, camp_style, listing_tier, "
                 "camp_url, age_min, age_max, cost_min, cost_max, activities, description "
                 "FROM camp_directory.camps_clean WHERE status=1 AND province != 'Unknown' "
                 "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT :lim"
             ), {"lim": limit})
-            rows4 = result4.fetchall()
-            return [dict(zip(list(result4.keys()), row)) for row in rows4], province, resolved_region, 'no_match'
+            rows4 = r4.fetchall()
+            return [dict(zip(list(r4.keys()), row)) for row in rows4], province, resolved_region, 'no_match'
 
     except Exception as e:
         return [], province, resolved_region, f"error: {str(e)[:200]}"
@@ -460,10 +476,21 @@ def process_query(user_text, config, client_camps, chat_history=None):
 
     # Step 5: Build fallback note for Gemini
     fallback_note = ""
-    if fallback == 'no_region':
-        fallback_note = f"Note: No camps found specifically near {region}, so showing results from {province} instead."
-    elif fallback == 'no_activity':
-        fallback_note = f"Note: No {filters.get('activity','matching')} camps found in {province}, showing other available camps."
+    activity_label = filters.get('activity','') or ''
+    if fallback == 'no_activity_in_region':
+        fallback_note = (f"IMPORTANT: No camps specifically offering '{activity_label}' were found near {region}. "
+                        f"The camps shown are in {region} but do NOT specifically offer '{activity_label}'. "
+                        f"Tell the user honestly there are no '{activity_label}' camps in this area "
+                        f"and suggest they contact these local camps to ask about accommodations, "
+                        f"or suggest broadening their search.")
+    elif fallback == 'no_activity_in_province':
+        fallback_note = (f"IMPORTANT: No camps specifically offering '{activity_label}' were found in {province}. "
+                        f"The camps shown are in {province} but do NOT offer '{activity_label}'. "
+                        f"Be honest about this — do not suggest unrelated camps 'might' offer it. "
+                        f"Suggest the user contact camps directly or broaden their search.")
+    elif fallback == 'province_only':
+        fallback_note = (f"IMPORTANT: No '{activity_label}' camps found in {province}. "
+                        f"Showing other camps in {province}. Be honest about the mismatch.")
     elif fallback == 'no_match':
         fallback_note = "Note: No exact matches found, showing top available member camps."
 
@@ -489,14 +516,20 @@ Extracted search criteria: {filters}
 Available camps from our verified member database:
 {camp_context}
 
-Please provide a personalized consultant response recommending the best camps from this list.
-Include for each camp:
-- Camp name as a clickable link to their camps.ca page
-- Location (region, province)  
-- Why it fits the user's request
-- Age range and weekly cost
-- Day camp or overnight camp
-Maximum 5 recommendations. End with an offer to refine the search."""
+Please provide a personalized consultant response.
+CRITICAL RULES:
+- Only recommend camps that genuinely match what the user asked for
+- If the fallback note says camps do NOT match the request, say so honestly
+- Never suggest an unrelated camp "might" offer something it clearly doesn't
+- For dietary needs (gluten-free, nut-free etc): if no specific camps found, honestly say so and advise contacting camps directly
+- Include for each RELEVANT camp:
+  * Camp name as a clickable markdown link: [Camp Name](url)
+  * Location (region, province)
+  * Specific reason why it fits this user's request
+  * Age range and weekly cost
+  * Day camp or overnight camp
+- Maximum 5 recommendations
+- End with an offer to refine the search"""
 
     response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=1000)
 
