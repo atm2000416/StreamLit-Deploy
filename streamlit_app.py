@@ -309,13 +309,92 @@ def search_camps(filters, config, limit=8):
         params['region'] = f"%{resolved_region}%"
 
     if activity:
-        conditions.append(
-            "(activities LIKE :act OR program_names LIKE :act2 OR camp_name LIKE :act3 OR description LIKE :act4)"
-        )
-        params['act']  = f"%{activity}%"
-        params['act2'] = f"%{activity}%"
-        params['act3'] = f"%{activity}%"
-        params['act4'] = f"%{activity}%"
+        # Map common activities to specialty codes for reliable matching
+        activity_codes = {
+            # Sports
+            'hockey':       [29, 188],
+            'skating':      [51],
+            'ice skating':  [51],
+            'sports':       [188, 12, 54, 66, 63, 29],
+            'soccer':       [54],
+            'basketball':   [11, 12],
+            'tennis':       [66],
+            'golf':         [26],
+            'volleyball':   [63],
+            'swimming':     [56],
+            'swim':         [56],
+            'sailing':      [49],
+            'canoe':        [41],
+            'canoeing':     [41],
+            'lacrosse':     [188],
+            'baseball':     [188],
+            # STEM
+            'stem':         [268, 18, 67, 160, 180, 50, 159, 266, 332],
+            'science':      [268, 50, 18],
+            'technology':   [268, 18, 180],
+            'coding':       [18, 68, 159, 180, 266, 268, 332],
+            'programming':  [18, 68, 159, 180, 266, 332],
+            'robotics':     [67, 268, 160],
+            'engineering':  [160, 268, 50],
+            'math':         [20, 129],
+            'ai':           [159, 302, 268],
+            'game design':  [68],
+            # Arts
+            'arts':         [9, 10, 69, 173, 178, 355],
+            'art':          [9, 10, 69, 173, 355],
+            'music':        [37],
+            'dance':        [22],
+            'theatre':      [59, 172],
+            'drama':        [59, 172],
+            'animation':    [178],
+            'photography':  [69],
+            'cooking':      [133],
+            'chef':         [133],
+            # Outdoor / Traditional
+            'outdoor':      [24, 41, 49, 58, 181, 265],
+            'adventure':    [41, 181],
+            'traditional':  [24, 58, 181, 265],
+            'nature':       [24, 181],
+            'canoe':        [41],
+            # Academic
+            'academic':     [20, 32, 97, 196, 314],
+            'french':       [314],
+            'language':     [314],
+            'tutoring':     [32, 97, 314],
+            'debate':       [302],
+            'writing':      [362],
+            'chess':        [278],
+            # Other
+            'equestrian':   [30],
+            'riding':       [30],
+            'horse':        [30],
+            'leadership':   [33, 79, 88],
+            'special needs':[252],
+            'wellness':     [91],
+        }
+        act_lower = activity.lower().strip()
+        codes = activity_codes.get(act_lower, [])
+
+        if codes:
+            # FIND_IN_SET for known activities + text fallback for variants
+            code_conds = " OR ".join([f"FIND_IN_SET({c}, specialty_codes)" for c in codes])
+            conditions.append(
+                f"(({code_conds}) "
+                f"OR program_names LIKE :act_text "
+                f"OR description LIKE :act_desc)"
+            )
+            params['act_text'] = f"%{act_lower}%"
+            params['act_desc'] = f"%{act_lower}%"
+        else:
+            # Unknown activity — search all text fields
+            conditions.append(
+                "(activities LIKE :act OR program_names LIKE :act2 "
+                "OR description LIKE :act3 OR camp_name LIKE :act4)"
+            )
+            params['act']  = f"%{act_lower}%"
+            params['act2'] = f"%{act_lower}%"
+            params['act3'] = f"%{act_lower}%"
+            params['act4'] = f"%{act_lower}%"
 
     if age:
         conditions.append("age_min <= :age AND age_max >= :age")
@@ -407,9 +486,17 @@ def search_camps(filters, config, limit=8):
 
 
 def format_camp_context(camps):
-    """Format camp data as readable context for Gemini"""
-    lines = []
+    """Format camp data as readable context for Gemini — deduplicated by cid"""
+    # Deduplicate: keep one row per camp (best region match = first occurrence)
+    seen_cids = set()
+    deduped = []
     for c in camps:
+        cid = c.get('cid')
+        if cid not in seen_cids:
+            seen_cids.add(cid)
+            deduped.append(c)
+    lines = []
+    for c in deduped:
         name      = c.get('camp_name', '')
         url       = c.get('camp_url', '')
         province  = c.get('province', '')
@@ -438,7 +525,7 @@ def format_camp_context(camps):
     return "\n---\n".join(lines)
 
 
-def process_query(user_text, config, client_camps, chat_history=None):
+def process_query(user_text, config, client_camps, chat_history=None, last_filters=None):
     """Main RAG pipeline — Gemini extracts filters, SQL fetches camps, Gemini writes response"""
     import time
     start = time.time()
@@ -455,7 +542,15 @@ def process_query(user_text, config, client_camps, chat_history=None):
     text_lower_check = user_text.lower()
     is_pure_refinement = any(p in text_lower_check for p in refinement_only_phrases)
 
-    if chat_history and is_pure_refinement:
+    # Short affirmative replies ("sure", "yes", "ok", "show me more") — reuse last filters
+    affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
+    is_affirmative = user_text.lower().strip().rstrip('!.') in affirmatives
+
+    if is_affirmative and last_filters:
+        # Reuse last search filters but remove cost/age restrictions to broaden
+        filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style')}
+        combined = user_text
+    elif chat_history and is_pure_refinement:
         recent = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
         combined = " ".join(recent + [user_text])
     else:
@@ -463,7 +558,7 @@ def process_query(user_text, config, client_camps, chat_history=None):
         combined = user_text
 
     # Step 2: Extract filters using Gemini
-    filters = extract_filters(combined, config["GEMINI_API_KEY"])
+    filters = extract_filters(combined, config["GEMINI_API_KEY"]) if not (is_affirmative and last_filters) else filters
 
     # Step 3: Fetch matching camps from camps_clean
     camps, province, region, fallback = search_camps(filters, config)
@@ -502,10 +597,13 @@ def process_query(user_text, config, client_camps, chat_history=None):
 You help parents find the perfect verified member camp for their children.
 Be warm, helpful, and specific. Keep responses concise but valuable.
 {greeting}
-Always include the camp URL as a clickable markdown link like [Camp Name](url).
-Only recommend camps from the provided list — do not invent camps.
-If the search returned fallback results, acknowledge this honestly and suggest alternatives.
-All camps are verified members of camps.ca / ourkids.net network."""
+STRICT RULES:
+1. Only recommend camps from the provided database list — never invent or assume details
+2. Use ONLY the description text provided for each camp — do not add information from your training
+3. Always format camp names as clickable markdown links: [Camp Name](url)
+4. If fallback note says camps don't match request, say so honestly — never force relevance
+5. All camps are verified members of camps.ca network
+6. Never say a camp "might" offer something unless it's in the provided description"""
 
     user_prompt = f"""User request: {user_text}
 
@@ -548,7 +646,7 @@ CRITICAL RULES:
         response = f"Here are matching camps:\n" + "\n".join(lines)
 
     elapsed = time.time() - start
-    return response, elapsed
+    return response, elapsed, filters
 
 
 # ═════════════════════════════════════════════
@@ -615,6 +713,7 @@ with st.sidebar:
     if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.consultation_done = False
+        st.session_state.last_filters = None
         st.rerun()
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -622,6 +721,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "consultation_done" not in st.session_state:
     st.session_state.consultation_done = False
+if "last_filters" not in st.session_state:
+    st.session_state.last_filters = None
 
 # ── Handle consultation form submission ───────────────────────────────────────
 if submitted and contact_name and region_camp:
@@ -671,10 +772,12 @@ if last_msg and last_msg["role"] == "user" and not st.session_state.consultation
     with st.chat_message("assistant"):
         with st.spinner("Searching member camps..."):
             try:
-                response, elapsed = process_query(
+                response, elapsed, filters = process_query(
                     last_msg["content"], config, client_camps,
-                    chat_history=st.session_state.messages
+                    chat_history=st.session_state.messages,
+                    last_filters=st.session_state.last_filters
                 )
+                st.session_state.last_filters = filters
 
                 # Append follow-up prompt after first consultation result
                 follow_up = (
@@ -710,10 +813,12 @@ if prompt := st.chat_input("Refine your search or ask a follow-up question..."):
     with st.chat_message("assistant"):
         with st.spinner("Searching..."):
             try:
-                response, elapsed = process_query(
+                response, elapsed, filters = process_query(
                     prompt, config, client_camps,
-                    chat_history=st.session_state.messages
+                    chat_history=st.session_state.messages,
+                    last_filters=st.session_state.last_filters
                 )
+                st.session_state.last_filters = filters
                 st.markdown(response)
                 st.caption(f"⚡ {elapsed:.1f}s • Verified member camps")
                 st.session_state.messages.append({"role": "assistant", "content": response})
