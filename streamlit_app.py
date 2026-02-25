@@ -209,7 +209,7 @@ Return ONLY a valid JSON object with these fields (use null if not mentioned):
 {
   "province": "full province name or null",
   "region": "city or region name or null",
-  "activity": "main activity type or null",
+  "activity": "main activity or dietary/special need or null",
   "age": integer or null,
   "max_cost": integer or null,
   "style": "day" or "overnight" or null,
@@ -217,14 +217,21 @@ Return ONLY a valid JSON object with these fields (use null if not mentioned):
 }
 Province must be one of: British Columbia, Alberta, Ontario, Quebec, Manitoba, Saskatchewan, Nova Scotia, New Brunswick, Prince Edward Island, Newfoundland and Labrador.
 For cities, set region to the city name and infer the province.
+For dietary or special needs, put the need in activity field.
 Examples:
 - "etobicoke" → province: "Ontario", region: "Toronto"
-- "nepean" → province: "Ontario", region: "Ottawa Region"  
+- "nepean" → province: "Ontario", region: "Ottawa Region"
+- "mississauga" → province: "Ontario", region: "Halton - Peel"
 - "debate camps" → activity: "debate"
 - "hockey" → activity: "hockey"
+- "gluten free" → activity: "gluten"
+- "special needs" → activity: "special needs"
+- "autism" → activity: "autism"
 - "under $500" → max_cost: 500
 - "10 year old" → age: 10
-- "teens" → age: 15"""
+- "teens" → age: 15
+- "my name is Sarah" → name: "Sarah"
+IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
     result = call_gemini(system, user_text, api_key, max_tokens=200)
     import json, re
@@ -303,11 +310,12 @@ def search_camps(filters, config, limit=8):
 
     if activity:
         conditions.append(
-            "(activities LIKE :act OR program_names LIKE :act2 OR camp_name LIKE :act3)"
+            "(activities LIKE :act OR program_names LIKE :act2 OR camp_name LIKE :act3 OR description LIKE :act4)"
         )
         params['act']  = f"%{activity}%"
         params['act2'] = f"%{activity}%"
         params['act3'] = f"%{activity}%"
+        params['act4'] = f"%{activity}%"
 
     if age:
         conditions.append("age_min <= :age AND age_max >= :age")
@@ -419,16 +427,23 @@ def process_query(user_text, config, client_camps, chat_history=None):
     import time
     start = time.time()
 
-    # Step 1: Build combined context from chat history
-    if chat_history:
-        recent = [m["content"] for m in chat_history[-3:] if m["role"] == "user"]
-        # Only include history if current message has no location (refinement)
-        location_words = ['ontario','british columbia','alberta','quebec','manitoba',
-                         'vancouver','toronto','ottawa','calgary','edmonton','winnipeg',
-                         'montreal','halifax','bc','etobicoke','nepean','scarborough']
-        has_location = any(w in user_text.lower() for w in location_words)
-        combined = " ".join(recent[:-1] + [user_text]) if not has_location else user_text
+    # Step 1: Determine if this is a refinement or a fresh query
+    # Fresh query = has new location OR new activity topic → no history bleed
+    # Refinement = "show more", "under $X", "day camps only" → carry context
+    refinement_only_phrases = [
+        'show more', 'more options', 'any others', 'what else',
+        'day camps only', 'overnight only', 'just day', 'just overnight',
+        'cheaper', 'less expensive', 'more affordable',
+        'closer', 'nearer', 'same area',
+    ]
+    text_lower_check = user_text.lower()
+    is_pure_refinement = any(p in text_lower_check for p in refinement_only_phrases)
+
+    if chat_history and is_pure_refinement:
+        recent = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
+        combined = " ".join(recent + [user_text])
     else:
+        # Fresh query — use current message only, no history bleed
         combined = user_text
 
     # Step 2: Extract filters using Gemini
