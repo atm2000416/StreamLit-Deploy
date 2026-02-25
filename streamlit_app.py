@@ -479,10 +479,10 @@ def run_case1(user_text, _config):
 
                 # Detect name for personalized greeting
                 import re as _re
-                name_match = _re.search(r'my name is (\w+)', combined_text.lower())
+                name_match = _re.search(r'my name is (\w+)', text_lower)
                 greeting = f"Great news, **{name_match.group(1).title()}**! " if name_match else ""
 
-                activity_label = ", ".join([k for k in specialty_map if k in combined_text.lower()][:2])
+                activity_label = ", ".join([k for k in specialty_map if k in text_lower][:2])
                 location_label = region_filter or location_filter or ""
                 if greeting and activity_label and location_label:
                     intro = f"{greeting}Here are the best **{activity_label}** camps in **{location_label}** for you:\n\n"
@@ -526,7 +526,7 @@ def run_case1(user_text, _config):
                 if rows:
                     camps = format_rows(rows, list(result.keys()))
                     # Only show keywords the user actually typed
-                    user_kws = [k for k in specialty_map if k in combined_text.lower()][:2]
+                    user_kws = [k for k in specialty_map if k in text_lower][:2]
                     kw_label = " and ".join(user_kws) if user_kws else "that type of"
                     loc_label = region_filter or location_filter or "that area"
                     return (
