@@ -634,15 +634,12 @@ CRITICAL RULES:
 - Never suggest an unrelated camp "might" offer something it clearly doesn't
 - For dietary needs (gluten-free, nut-free etc): if no specific camps found, honestly say so and advise contacting camps directly
 - Include for each RELEVANT camp:
-  * Camp name as a clickable markdown link: [Camp Name](url)
-  * Location (region, province)
-  * Specific reason why it fits this user's request
-  * Age range and weekly cost
-  * Day camp or overnight camp
-- List ALL matching camps, do not limit to 5
-- End with an offer to refine the search"""
+- List ALL matching camps in this compact one-line format:
+  **[Camp Name](url)** — Day/Overnight, Region | Ages X-Y | $min-$max/week | brief reason it fits
+- Do not use sub-bullets or multi-line entries per camp — one line per camp only
+- After the full list, add one short sentence offering to refine"""
 
-    response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=1000)
+    response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=4000)
 
     if not response:
         # Fallback to simple formatted list if Gemini fails
