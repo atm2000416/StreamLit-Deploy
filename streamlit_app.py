@@ -440,13 +440,21 @@ def search_camps(filters, config, limit=100):
             GROUP_CONCAT(DISTINCT sc.specialty_label
                 ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
             GROUP_CONCAT(
-                DISTINCT CONCAT(sc.session_id, ':', sc.class_name, ' (ages ', sc.age_from, '-', sc.age_to, ')')
-                ORDER BY sc.listing_tier SEPARATOR ' | '
+                DISTINCT CONCAT(
+                    sc.session_id, ':', sc.class_name,
+                    ' (ages ', sc.age_from, '-', sc.age_to, ')',
+                    IF(COALESCE(NULLIF(TRIM(s.mini_description),''), NULLIF(TRIM(s.description),'')) IS NOT NULL,
+                       CONCAT(' -- ', LEFT(COALESCE(NULLIF(TRIM(s.mini_description),''), TRIM(s.description)), 200)),
+                       '')
+                )
+                ORDER BY sc.listing_tier SEPARATOR ' ||| '
             )                               AS matching_programs,
             cc.description
         FROM camp_directory.sessions_clean sc
         JOIN camp_directory.camps_clean cc
             ON cc.cid = sc.cid AND cc.province = sc.province
+        LEFT JOIN camp_directory.sessions s
+            ON s.id = sc.session_id
         WHERE {where}
         GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
                  sc.listing_tier, sc.camp_url, cc.description
@@ -749,9 +757,9 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     user_name = filters.get('name', '')
     greeting  = f"The user's name is {user_name}. Address them by name." if user_name else ""
 
-    system_prompt = f"""You are an expert Canadian camp consultant at camps.ca and ourkids.net.
-You help parents find the perfect verified member camp for their children.
-Be warm, helpful, and specific. Keep responses concise but valuable.
+    system_prompt = f"""You are a trusted Canadian camp consultant at camps.ca and ourkids.net — the kind who has personally visited these camps and knows what makes each one special.
+You speak to parents like a knowledgeable friend: warm, direct, and confident. No filler phrases, no corporate tone.
+Every recommendation feels personal and specific — never generic.
 {greeting}
 STRICT RULES:
 1. Only recommend camps from the provided database list — never invent or assume details
@@ -783,14 +791,17 @@ CRITICAL RULES:
 - Format EVERY camp exactly like this — no exceptions:
   * **[Camp Name](url)**
      * Location: Region, Province
-     * Why it fits: [cite the specific matching program(s) from MATCHING_PROGRAMS — include session ID and program name]
+     * Why it fits: [1-2 sentences max — warm, specific, written like a trusted friend recommending this program. Draw from the program description in MATCHING_PROGRAMS (after the ' -- '). Lead with what makes this program stand out for the child, not a dry list of features. If no description available, use the camp's Description field.]
      * Ages: X-Y | Cost: $min-$max/week
      * Type: Day Camp or Overnight Camp
 - URL RULES — use in this priority order:
   1. If SESSION_COUNT = 1: use SESSION_URL as the link (links directly to the specific program)
   2. If SESSION_COUNT > 1: use MARKDOWN_LINK (links to the camp's main page)
-- MATCHING_PROGRAMS contains: "sessionID:program name (ages X-Y)" — cite this in Why it fits
-  Example: "Has 2 hockey programs: #16989 CampTO Plus: Cheerleading (ages 6-12)"
+- MATCHING_PROGRAMS format is: "sessionID:program name (ages X-Y) -- program description"
+  The ' -- ' separator divides the program label from its description text
+- Use the description text (after ' -- ') as your source for Why it fits — rewrite it in your own warm voice, don't copy it verbatim
+- If multiple programs match, pick the strongest description and mention the count naturally: "3 cheerleading programs including..."
+- Keep Why it fits to 1-2 punchy sentences. No corporate language. Sound like you've seen these programs firsthand.
 - EXCLUSION RULE: If a camp's MATCHING_PROGRAMS is empty or null, exclude it from results entirely
 - List ALL camps that have matching programs
 - After the full list, add one short sentence offering to refine"""
