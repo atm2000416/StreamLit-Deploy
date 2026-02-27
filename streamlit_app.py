@@ -570,12 +570,12 @@ def format_camp_context(camps):
             deduped.append(c)
     lines = []
     for c in deduped:
-        name         = c.get('camp_name', '')
-        session_count = c.get('session_count', 0) or 0
-        session_url   = c.get('session_url', '')
-        camp_url      = c.get('camp_url', '')
+        name          = c.get('camp_name', '') or ''
+        session_count = int(c.get('session_count') or 0)
+        session_url   = c.get('session_url') or ''
+        camp_url      = c.get('camp_url') or ''
         # Link directly to the specific session when only 1 matched
-        url           = session_url if (session_count == 1 and session_url) else camp_url
+        url           = session_url if (session_count == 1 and session_url) else (camp_url or session_url)
         province  = c.get('province', '')
         region    = c.get('region', '')
         style     = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
@@ -702,7 +702,7 @@ STRICT RULES:
 3. Always format camp names as clickable markdown links: [Camp Name](url)
 4. If context contains DIETARY_SEARCH: true, tell the user no matching camps were found in our
    member network for that dietary need, then say: "You can search our full directory at:
-   [camps.ca search]({SEARCH_URL})" — replace {SEARCH_URL} with the actual SEARCH_URL value from context.
+   [camps.ca search](SEARCH_URL_HERE)" — use the actual SEARCH_URL value from the context above as the link URL.
 5. Never show gender-filtered results as co-ed. If gender=girls, all results are girls-only camps.
 4. If fallback note says camps don't match request, say so honestly — never force relevance
 5. All camps are verified members of camps.ca network
