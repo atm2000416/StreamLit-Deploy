@@ -244,7 +244,7 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
 
 
 def search_camps(filters, config, limit=100):
-    """Query camps_clean using extracted filters — simple WHERE clauses, no joins"""
+    """Query sessions_clean joined to camps_clean for session-level precision"""
     from sqlalchemy import create_engine, text
 
     # Region mapping for common cities/districts
@@ -297,15 +297,15 @@ def search_camps(filters, config, limit=100):
         province = city_province_map[region_lower]
     resolved_region = region_map.get(region_lower, region)
 
-    conditions = ["status = 1", "province != 'Unknown'"]
+    conditions = ["sc.status = 1", "sc.province != 'Unknown'", "sc.is_virtual = 0"]
     params = {}
 
     if province:
-        conditions.append("province = :province")
+        conditions.append("sc.province = :province")
         params['province'] = province
 
     if resolved_region:
-        conditions.append("region LIKE :region")
+        conditions.append("sc.region LIKE :region")
         params['region'] = f"%{resolved_region}%"
 
     if activity:
@@ -377,44 +377,48 @@ def search_camps(filters, config, limit=100):
 
         if codes:
             # FIND_IN_SET for known activities + text fallback for variants
-            code_conds = " OR ".join([f"FIND_IN_SET({c}, specialty_codes)" for c in codes])
-            conditions.append(
-                f"(({code_conds}) "
-                f"OR program_names LIKE :act_text "
-                f"OR description LIKE :act_desc)"
-            )
-            params['act_text'] = f"%{act_lower}%"
-            params['act_desc'] = f"%{act_lower}%"
+            # Use specialty codes for known activities — exact match on sessions_clean.specialty
+            code_list = ",".join(str(c) for c in codes)
+            conditions.append(f"sc.specialty IN ({code_list})")
         else:
-            # Unknown activity — search all text fields
+            # Unknown activity — search class_name text
             conditions.append(
-                "(activities LIKE :act OR program_names LIKE :act2 "
-                "OR description LIKE :act3 OR camp_name LIKE :act4)"
+                "(sc.specialty_label LIKE :act OR sc.class_name LIKE :act2)"
             )
             params['act']  = f"%{act_lower}%"
             params['act2'] = f"%{act_lower}%"
-            params['act3'] = f"%{act_lower}%"
-            params['act4'] = f"%{act_lower}%"
 
     if age:
-        conditions.append("age_min <= :age AND age_max >= :age")
+        conditions.append("sc.age_from <= :age AND sc.age_to >= :age")
         params['age'] = age
 
     if max_cost:
-        conditions.append("(cost_min <= :cost OR cost_min IS NULL)")
+        conditions.append("(sc.cost_from <= :cost OR sc.cost_from = 0)")
         params['cost'] = max_cost
 
     if style:
-        conditions.append("camp_style = :style")
+        conditions.append("sc.camp_style = :style")
         params['style'] = style
 
     where = " AND ".join(conditions)
-    sql = f"""SELECT DISTINCT cid, camp_name, province, region,
-            camp_style, listing_tier, camp_url,
-            age_min, age_max, cost_min, cost_max, activities, description
-        FROM camp_directory.camps_clean
+    sql = f"""SELECT
+            sc.cid, sc.camp_name, sc.province,
+            MIN(sc.region)                  AS region,
+            sc.camp_style, sc.listing_tier, sc.camp_url,
+            MIN(sc.age_from)                AS age_min,
+            MAX(sc.age_to)                  AS age_max,
+            MIN(NULLIF(sc.cost_from,0))     AS cost_min,
+            MAX(NULLIF(sc.cost_to,0))       AS cost_max,
+            GROUP_CONCAT(DISTINCT sc.specialty_label
+                ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+            cc.description
+        FROM camp_directory.sessions_clean sc
+        JOIN camp_directory.camps_clean cc
+            ON cc.cid = sc.cid AND cc.province = sc.province
         WHERE {where}
-        ORDER BY FIELD(listing_tier, 'gold', 'silver', 'bronze'), camp_name
+        GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
+                 sc.listing_tier, sc.camp_url, cc.description
+        ORDER BY FIELD(sc.listing_tier, 'gold', 'silver', 'bronze'), sc.camp_name
         LIMIT {limit}"""
 
     try:
@@ -429,14 +433,20 @@ def search_camps(filters, config, limit=100):
 
             # Fallback 1: drop activity, keep region + province
             if resolved_region and province and activity:
-                params_no_act = {k:v for k,v in params.items() if k not in ('act','act2','act3','act4')}
-                conds_no_act  = [c for c in conditions if 'activities' not in c and 'program_names' not in c and 'description' not in c and 'camp_name LIKE' not in c]
-                sql_f1 = f"""SELECT DISTINCT cid, camp_name, province, region,
-                        camp_style, listing_tier, camp_url,
-                        age_min, age_max, cost_min, cost_max, activities, description
-                    FROM camp_directory.camps_clean
+                params_no_act = {k:v for k,v in params.items() if k not in ('act','act2')}
+                conds_no_act  = [c for c in conditions if 'specialty' not in c and 'class_name' not in c]
+                sql_f1 = f"""SELECT sc.cid, sc.camp_name, sc.province,
+                        MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
+                        MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
+                        MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
+                        GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+                        cc.description
+                    FROM camp_directory.sessions_clean sc
+                    JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
                     WHERE {' AND '.join(conds_no_act)}
-                    ORDER BY FIELD(listing_tier,'gold','silver','bronze')
+                    GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
+                             sc.listing_tier, sc.camp_url, cc.description
+                    ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
                     LIMIT {limit}"""
                 r1 = conn.execute(text(sql_f1), params_no_act)
                 rows1 = r1.fetchall()
@@ -447,12 +457,18 @@ def search_camps(filters, config, limit=100):
             if resolved_region and province:
                 params_no_reg = {k:v for k,v in params.items() if k != 'region'}
                 conds_no_reg  = [c for c in conditions if 'region' not in c]
-                sql_f2 = f"""SELECT DISTINCT cid, camp_name, province, region,
-                        camp_style, listing_tier, camp_url,
-                        age_min, age_max, cost_min, cost_max, activities, description
-                    FROM camp_directory.camps_clean
+                sql_f2 = f"""SELECT sc.cid, sc.camp_name, sc.province,
+                        MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
+                        MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
+                        MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
+                        GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+                        cc.description
+                    FROM camp_directory.sessions_clean sc
+                    JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
                     WHERE {' AND '.join(conds_no_reg)}
-                    ORDER BY FIELD(listing_tier,'gold','silver','bronze')
+                    GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
+                             sc.listing_tier, sc.camp_url, cc.description
+                    ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
                     LIMIT {limit}"""
                 r2 = conn.execute(text(sql_f2), params_no_reg)
                 rows2 = r2.fetchall()
@@ -462,10 +478,17 @@ def search_camps(filters, config, limit=100):
             # Fallback 3: province only — drop both activity and region
             if province:
                 r3 = conn.execute(text(
-                    "SELECT DISTINCT cid, camp_name, province, region, camp_style, listing_tier, "
-                    "camp_url, age_min, age_max, cost_min, cost_max, activities, description "
-                    "FROM camp_directory.camps_clean WHERE status=1 AND province=:p "
-                    "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT :lim"
+                    "SELECT sc.cid, sc.camp_name, sc.province, MIN(sc.region) AS region, "
+                    "sc.camp_style, sc.listing_tier, sc.camp_url, "
+                    "MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max, "
+                    "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
+                    "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
+                    "cc.description "
+                    "FROM camp_directory.sessions_clean sc "
+                    "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
+                    "WHERE sc.status=1 AND sc.province=:p AND sc.is_virtual=0 "
+                    "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
+                    "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
                 ), {"p": province, "lim": limit})
                 rows3 = r3.fetchall()
                 if rows3:
@@ -473,10 +496,17 @@ def search_camps(filters, config, limit=100):
 
             # Fallback 4: top camps overall
             r4 = conn.execute(text(
-                "SELECT DISTINCT cid, camp_name, province, region, camp_style, listing_tier, "
-                "camp_url, age_min, age_max, cost_min, cost_max, activities, description "
-                "FROM camp_directory.camps_clean WHERE status=1 AND province != 'Unknown' "
-                "ORDER BY FIELD(listing_tier,'gold','silver','bronze') LIMIT :lim"
+                "SELECT sc.cid, sc.camp_name, sc.province, MIN(sc.region) AS region, "
+                "sc.camp_style, sc.listing_tier, sc.camp_url, "
+                "MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max, "
+                "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
+                "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
+                "cc.description "
+                "FROM camp_directory.sessions_clean sc "
+                "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
+                "WHERE sc.status=1 AND sc.province != 'Unknown' AND sc.is_virtual=0 "
+                "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
+                "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
             ), {"lim": limit})
             rows4 = r4.fetchall()
             return [dict(zip(list(r4.keys()), row)) for row in rows4], province, resolved_region, 'no_match'
@@ -523,12 +553,12 @@ def format_camp_context(camps):
         activities= clean_activities(c.get('activities', ''))
         desc      = (c.get('description') or '')[:300]
 
-        age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else ""
-        cost_str = f"${cost_min}-${cost_max}/week" if cost_min and cost_max else ""
+        age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else "Ages vary"
+        cost_str = f"${cost_min:,}-${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
 
         lines.append(
             f"CAMP: {name}\n"
-            f"URL: {url}\n"
+            f"MARKDOWN_LINK: [{name}]({url})\n"
             f"Location: {region}, {province}\n"
             f"Type: {style} | Tier: {tier}\n"
             f"Activities: {activities}\n"
@@ -636,6 +666,7 @@ CRITICAL RULES:
 - Include for each RELEVANT camp:
 - List ALL matching camps in this compact one-line format:
   **[Camp Name](url)** — Day/Overnight, Region | Ages X-Y | $min-$max/week | brief reason it fits
+- IMPORTANT: Use the exact URL from each camp's 'MARKDOWN_LINK' field — copy it exactly as [Name](url)
 - Do not use sub-bullets or multi-line entries per camp — one line per camp only
 - After the full list, add one short sentence offering to refine"""
 
