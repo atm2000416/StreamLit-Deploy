@@ -485,6 +485,19 @@ def search_camps(filters, config, limit=100):
         return [], province, resolved_region, f"error: {str(e)[:200]}"
 
 
+def clean_activities(activities_str):
+    """Remove duplicate activity labels e.g. 'Basketball, Basketball' → 'Basketball'"""
+    if not activities_str:
+        return ''
+    seen = set()
+    result = []
+    for a in activities_str.split(', '):
+        a = a.strip()
+        if a and a not in seen:
+            seen.add(a)
+            result.append(a)
+    return ', '.join(result)
+
 def format_camp_context(camps):
     """Format camp data as readable context for Gemini — deduplicated by cid"""
     # Deduplicate: keep one row per camp (best region match = first occurrence)
@@ -507,7 +520,7 @@ def format_camp_context(camps):
         age_max   = c.get('age_max', '')
         cost_min  = c.get('cost_min', '')
         cost_max  = c.get('cost_max', '')
-        activities= c.get('activities', '')
+        activities= clean_activities(c.get('activities', ''))
         desc      = (c.get('description') or '')[:300]
 
         age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else ""
