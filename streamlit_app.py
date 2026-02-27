@@ -243,7 +243,7 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         return {}
 
 
-def search_camps(filters, config, limit=8):
+def search_camps(filters, config, limit=100):
     """Query camps_clean using extracted filters — simple WHERE clauses, no joins"""
     from sqlalchemy import create_engine, text
 
@@ -626,7 +626,7 @@ CRITICAL RULES:
   * Specific reason why it fits this user's request
   * Age range and weekly cost
   * Day camp or overnight camp
-- Maximum 5 recommendations
+- List ALL matching camps, do not limit to 5
 - End with an offer to refine the search"""
 
     response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=1000)
