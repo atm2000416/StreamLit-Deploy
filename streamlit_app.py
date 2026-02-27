@@ -388,15 +388,21 @@ def search_camps(filters, config, limit=100):
             'beauty':       [172],
         }
         act_lower = activity.lower().strip()
-        codes = activity_codes.get(act_lower, [])
+        codes     = activity_codes.get(act_lower, [])
+
+        # Generic umbrella codes that should NOT qualify a session for a specific
+        # activity search — e.g. 188=Sports should NOT match "hockey",
+        # 268=STEM should NOT match "coding", 9/10=Arts should NOT match "dance"
+        generic_codes = {188, 268, 9, 10, 79, 33}
 
         if codes:
-            # FIND_IN_SET for known activities + text fallback for variants
-            # Use specialty codes for known activities — exact match on sessions_clean.specialty
-            code_list = ",".join(str(c) for c in codes)
+            # Primary = specific codes only (strips umbrella generics)
+            primary = [c for c in codes if c not in generic_codes]
+            use     = primary if primary else codes   # if ALL codes are generic, use all
+            code_list = ",".join(str(c) for c in use)
             conditions.append(f"(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))")
         else:
-            # Unknown activity — search class_name text
+            # Unknown activity — text search on class_name
             conditions.append(
                 "(sc.specialty_label LIKE :act OR sc.class_name LIKE :act2)"
             )
@@ -433,6 +439,10 @@ def search_camps(filters, config, limit=100):
             COUNT(DISTINCT sc.session_id)   AS session_count,
             GROUP_CONCAT(DISTINCT sc.specialty_label
                 ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+            GROUP_CONCAT(
+                DISTINCT CONCAT(sc.session_id, ':', sc.class_name, ' (ages ', sc.age_from, '-', sc.age_to, ')')
+                ORDER BY sc.listing_tier SEPARATOR ' | '
+            )                               AS matching_programs,
             cc.description
         FROM camp_directory.sessions_clean sc
         JOIN camp_directory.camps_clean cc
@@ -464,6 +474,7 @@ def search_camps(filters, config, limit=100):
                         MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
                         COUNT(DISTINCT sc.session_id) AS session_count,
                         GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+                        GROUP_CONCAT(DISTINCT CONCAT(sc.session_id,':', sc.class_name,' (ages ',sc.age_from,'-',sc.age_to,')') ORDER BY sc.listing_tier SEPARATOR ' | ') AS matching_programs,
                         cc.description
                     FROM camp_directory.sessions_clean sc
                     JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
@@ -488,6 +499,7 @@ def search_camps(filters, config, limit=100):
                         MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
                         COUNT(DISTINCT sc.session_id) AS session_count,
                         GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+                        GROUP_CONCAT(DISTINCT CONCAT(sc.session_id,':', sc.class_name,' (ages ',sc.age_from,'-',sc.age_to,')') ORDER BY sc.listing_tier SEPARATOR ' | ') AS matching_programs,
                         cc.description
                     FROM camp_directory.sessions_clean sc
                     JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
@@ -511,6 +523,7 @@ def search_camps(filters, config, limit=100):
                     "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
                     "COUNT(DISTINCT sc.session_id) AS session_count, "
                     "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
+                    "GROUP_CONCAT(DISTINCT CONCAT(sc.session_id,':',sc.class_name,' (ages ',sc.age_from,'-',sc.age_to,')') ORDER BY sc.listing_tier SEPARATOR ' | ') AS matching_programs, "
                     "cc.description "
                     "FROM camp_directory.sessions_clean sc "
                     "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
@@ -531,6 +544,7 @@ def search_camps(filters, config, limit=100):
                 "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
                 "COUNT(DISTINCT sc.session_id) AS session_count, "
                 "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
+                "GROUP_CONCAT(DISTINCT CONCAT(sc.session_id,':',sc.class_name,' (ages ',sc.age_from,'-',sc.age_to,')') ORDER BY sc.listing_tier SEPARATOR ' | ') AS matching_programs, "
                 "cc.description "
                 "FROM camp_directory.sessions_clean sc "
                 "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
@@ -590,9 +604,15 @@ def format_camp_context(camps):
         age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else "Ages vary"
         cost_str = f"${cost_min:,}-${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
 
+        # matching_programs: pipe-separated "sessionID:class_name (ages X-Y)"
+        matching_programs = (c.get('matching_programs') or '').strip()
+
         lines.append(
             f"CAMP: {name}\n"
             f"MARKDOWN_LINK: [{name}]({url})\n"
+            f"SESSION_URL: {session_url}\n"
+            f"SESSION_COUNT: {session_count}\n"
+            f"MATCHING_PROGRAMS: {matching_programs}\n"
             f"Location: {region}, {province}\n"
             f"Type: {style} | Tier: {tier}\n"
             f"Activities: {activities}\n"
@@ -763,11 +783,16 @@ CRITICAL RULES:
 - Format EVERY camp exactly like this — no exceptions:
   * **[Camp Name](url)**
      * Location: Region, Province
-     * Why it fits: one sentence specific to the user's request
+     * Why it fits: [cite the specific matching program(s) from MATCHING_PROGRAMS — include session ID and program name]
      * Ages: X-Y | Cost: $min-$max/week
      * Type: Day Camp or Overnight Camp
-- Use the exact MARKDOWN_LINK value from each camp's context for the clickable link
-- List ALL matching camps in this format
+- URL RULES — use in this priority order:
+  1. If SESSION_COUNT = 1: use SESSION_URL as the link (links directly to the specific program)
+  2. If SESSION_COUNT > 1: use MARKDOWN_LINK (links to the camp's main page)
+- MATCHING_PROGRAMS contains: "sessionID:program name (ages X-Y)" — cite this in Why it fits
+  Example: "Has 2 hockey programs: #16989 CampTO Plus: Cheerleading (ages 6-12)"
+- EXCLUSION RULE: If a camp's MATCHING_PROGRAMS is empty or null, exclude it from results entirely
+- List ALL camps that have matching programs
 - After the full list, add one short sentence offering to refine"""
 
     response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=4000)
