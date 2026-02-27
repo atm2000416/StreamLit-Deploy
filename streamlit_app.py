@@ -213,7 +213,6 @@ Return ONLY a valid JSON object with these fields (use null if not mentioned):
   "age": integer or null,
   "max_cost": integer or null,
   "style": "day" or "overnight" or null,
-  "gender": "girls" or "boys" or "co-ed" or null,
   "name": "user first name if mentioned or null"
 }
 Province must be one of: British Columbia, Alberta, Ontario, Quebec, Manitoba, Saskatchewan, Nova Scotia, New Brunswick, Prince Edward Island, Newfoundland and Labrador.
@@ -226,15 +225,11 @@ Examples:
 - "debate camps" → activity: "debate"
 - "hockey" → activity: "hockey"
 - "gluten free" → activity: "gluten"
-- "vegetarian" → activity: "vegetarian"
 - "special needs" → activity: "special needs"
 - "autism" → activity: "autism"
 - "under $500" → max_cost: 500
 - "10 year old" → age: 10
 - "teens" → age: 15
-- "girls only" or "all-girls" → gender: "girls"
-- "boys only" or "all-boys" → gender: "boys"
-- "co-ed" → gender: "co-ed"
 - "my name is Sarah" → name: "Sarah"
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
@@ -295,7 +290,6 @@ def search_camps(filters, config, limit=100):
     age      = filters.get('age')
     max_cost = filters.get('max_cost')
     style    = filters.get('style')
-    gender   = filters.get('gender')
 
     # Resolve region/city to province if not set
     region_lower = (region or '').lower().strip()
@@ -377,47 +371,17 @@ def search_camps(filters, config, limit=100):
             'leadership':   [33, 79, 88],
             'special needs':[252],
             'wellness':     [91],
-            # Cheer / cheerleading
-            'cheer':        [22, 117, 188],
-            'cheerleading': [22, 117, 188],
-            # Fashion / design
-            'fashion':      [69, 173, 178, 9],
-            'design':       [178, 68, 9],
-            # Dietary / special diet — text search only (empty codes list)
-            'vegetarian':   [],
-            'vegan':        [],
-            'gluten':       [],
-            'nut-free':     [],
-            'kosher':       [],
-            'halal':        [],
         }
-
-        # Dietary keywords always use description text search
-        dietary_keywords = {'vegetarian', 'vegan', 'gluten', 'nut-free', 'nut free',
-                            'kosher', 'halal', 'dairy free', 'dairy-free', 'allergy'}
-
         act_lower = activity.lower().strip()
-        codes = activity_codes.get(act_lower, None)
-        is_dietary = act_lower in dietary_keywords or any(d in act_lower for d in dietary_keywords)
+        codes = activity_codes.get(act_lower, [])
 
-        if is_dietary:
-            # Dietary needs — broaden search to include camp description text
-            conditions.append(
-                "(cc.description LIKE :act OR sc.specialty_label LIKE :act2 OR sc.class_name LIKE :act3)"
-            )
-            params['act']  = f"%{act_lower}%"
-            params['act2'] = f"%{act_lower}%"
-            params['act3'] = f"%{act_lower}%"
-        elif codes is not None and len(codes) > 0:
-            # Known activity with specialty codes — code match OR text fallback
+        if codes:
+            # FIND_IN_SET for known activities + text fallback for variants
+            # Use specialty codes for known activities — exact match on sessions_clean.specialty
             code_list = ",".join(str(c) for c in codes)
-            conditions.append(
-                f"(sc.specialty IN ({code_list}) OR sc.specialty_label LIKE :act OR sc.class_name LIKE :act2)"
-            )
-            params['act']  = f"%{act_lower}%"
-            params['act2'] = f"%{act_lower}%"
+            conditions.append(f"sc.specialty IN ({code_list})")
         else:
-            # Unknown activity or empty-code activity — search specialty_label and class_name
+            # Unknown activity — search class_name text
             conditions.append(
                 "(sc.specialty_label LIKE :act OR sc.class_name LIKE :act2)"
             )
@@ -436,16 +400,6 @@ def search_camps(filters, config, limit=100):
         conditions.append("sc.camp_style = :style")
         params['style'] = style
 
-    # Gender filter — map to camps_clean gender column values
-    if gender:
-        gender_lower = gender.lower()
-        if gender_lower == 'girls':
-            conditions.append("(cc.gender = 'girls' OR cc.gender = 'Girls' OR cc.gender LIKE '%girl%')")
-        elif gender_lower == 'boys':
-            conditions.append("(cc.gender = 'boys' OR cc.gender = 'Boys' OR cc.gender LIKE '%boy%')")
-        elif gender_lower == 'co-ed':
-            conditions.append("(cc.gender = 'co-ed' OR cc.gender = 'coed' OR cc.gender IS NULL OR cc.gender = '')")
-
     where = " AND ".join(conditions)
     sql = f"""SELECT
             sc.cid, sc.camp_name, sc.province,
@@ -457,15 +411,13 @@ def search_camps(filters, config, limit=100):
             MAX(NULLIF(sc.cost_to,0))       AS cost_max,
             GROUP_CONCAT(DISTINCT sc.specialty_label
                 ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
-            cc.description,
-            cc.gender,
-            MIN(sc.sid)                     AS session_id
+            cc.description
         FROM camp_directory.sessions_clean sc
         JOIN camp_directory.camps_clean cc
             ON cc.cid = sc.cid AND cc.province = sc.province
         WHERE {where}
         GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
-                 sc.listing_tier, sc.camp_url, cc.description, cc.gender
+                 sc.listing_tier, sc.camp_url, cc.description
         ORDER BY FIELD(sc.listing_tier, 'gold', 'silver', 'bronze'), sc.camp_name
         LIMIT {limit}"""
 
@@ -479,47 +431,21 @@ def search_camps(filters, config, limit=100):
             if rows:
                 return [dict(zip(cols, row)) for row in rows], province, resolved_region, None
 
-            # Dietary fallback: if dietary search found nothing in region, try province-wide
-            dietary_kw = {'vegetarian', 'vegan', 'gluten', 'nut-free', 'nut free',
-                          'kosher', 'halal', 'dairy free', 'dairy-free', 'allergy'}
-            act_is_dietary = activity and (activity.lower() in dietary_kw or
-                                           any(d in activity.lower() for d in dietary_kw))
-            if act_is_dietary and resolved_region and province:
-                params_diet_prov = {k:v for k,v in params.items() if k != 'region'}
-                conds_diet_prov  = [c for c in conditions if 'region' not in c]
-                sql_diet = f"""SELECT sc.cid, sc.camp_name, sc.province,
-                        MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
-                        MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
-                        MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
-                        GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
-                        cc.description, cc.gender, MIN(sc.sid) AS session_id
-                    FROM camp_directory.sessions_clean sc
-                    JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
-                    WHERE {' AND '.join(conds_diet_prov)}
-                    GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
-                             sc.listing_tier, sc.camp_url, cc.description, cc.gender
-                    ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
-                    LIMIT {limit}"""
-                r_diet = conn.execute(text(sql_diet), params_diet_prov)
-                rows_diet = r_diet.fetchall()
-                if rows_diet:
-                    return [dict(zip(list(r_diet.keys()), row)) for row in rows_diet], province, resolved_region, None
-
             # Fallback 1: drop activity, keep region + province
             if resolved_region and province and activity:
-                params_no_act = {k:v for k,v in params.items() if k not in ('act','act2','act3')}
-                conds_no_act  = [c for c in conditions if 'specialty' not in c and 'class_name' not in c and 'description LIKE' not in c]
+                params_no_act = {k:v for k,v in params.items() if k not in ('act','act2')}
+                conds_no_act  = [c for c in conditions if 'specialty' not in c and 'class_name' not in c]
                 sql_f1 = f"""SELECT sc.cid, sc.camp_name, sc.province,
                         MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
                         MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
                         MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
                         GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
-                        cc.description, cc.gender, MIN(sc.sid) AS session_id
+                        cc.description
                     FROM camp_directory.sessions_clean sc
                     JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
                     WHERE {' AND '.join(conds_no_act)}
                     GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
-                             sc.listing_tier, sc.camp_url, cc.description, cc.gender
+                             sc.listing_tier, sc.camp_url, cc.description
                     ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
                     LIMIT {limit}"""
                 r1 = conn.execute(text(sql_f1), params_no_act)
@@ -536,12 +462,12 @@ def search_camps(filters, config, limit=100):
                         MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
                         MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
                         GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
-                        cc.description, cc.gender, MIN(sc.sid) AS session_id
+                        cc.description
                     FROM camp_directory.sessions_clean sc
                     JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
                     WHERE {' AND '.join(conds_no_reg)}
                     GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
-                             sc.listing_tier, sc.camp_url, cc.description, cc.gender
+                             sc.listing_tier, sc.camp_url, cc.description
                     ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
                     LIMIT {limit}"""
                 r2 = conn.execute(text(sql_f2), params_no_reg)
@@ -557,11 +483,11 @@ def search_camps(filters, config, limit=100):
                     "MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max, "
                     "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
                     "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
-                    "cc.description, cc.gender, MIN(sc.sid) AS session_id "
+                    "cc.description "
                     "FROM camp_directory.sessions_clean sc "
                     "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
                     "WHERE sc.status=1 AND sc.province=:p AND sc.is_virtual=0 "
-                    "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description, cc.gender "
+                    "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
                     "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
                 ), {"p": province, "lim": limit})
                 rows3 = r3.fetchall()
@@ -575,11 +501,11 @@ def search_camps(filters, config, limit=100):
                 "MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max, "
                 "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
                 "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
-                "cc.description, cc.gender, MIN(sc.sid) AS session_id "
+                "cc.description "
                 "FROM camp_directory.sessions_clean sc "
                 "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
                 "WHERE sc.status=1 AND sc.province != 'Unknown' AND sc.is_virtual=0 "
-                "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description, cc.gender "
+                "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
                 "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
             ), {"lim": limit})
             rows4 = r4.fetchall()
@@ -615,9 +541,7 @@ def format_camp_context(camps):
     lines = []
     for c in deduped:
         name      = c.get('camp_name', '')
-        camp_url  = c.get('camp_url', '')
-        cid       = c.get('cid', '')
-        session_id = c.get('session_id')
+        url       = c.get('camp_url', '')
         province  = c.get('province', '')
         region    = c.get('region', '')
         style     = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
@@ -628,17 +552,6 @@ def format_camp_context(camps):
         cost_max  = c.get('cost_max', '')
         activities= clean_activities(c.get('activities', ''))
         desc      = (c.get('description') or '')[:300]
-        gender    = c.get('gender') or 'Co-ed'
-
-        # Build session-level URL when we have cid and session_id
-        # camps.ca URL pattern: /city-of-region-camps/{cid}/session/{session_id}
-        if session_id and cid and camp_url and 'camps.ca' in camp_url:
-            # Extract the path prefix from the existing camp_url and append session
-            # camp_url typically: https://www.camps.ca/camp-name/cid
-            # Session URL: https://www.camps.ca/{slug}/{cid}/session/{session_id}
-            url = f"{camp_url}/session/{session_id}"
-        else:
-            url = camp_url
 
         age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else "Ages vary"
         cost_str = f"${cost_min:,}-${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
@@ -647,7 +560,7 @@ def format_camp_context(camps):
             f"CAMP: {name}\n"
             f"MARKDOWN_LINK: [{name}]({url})\n"
             f"Location: {region}, {province}\n"
-            f"Type: {style} | Tier: {tier} | Gender: {gender}\n"
+            f"Type: {style} | Tier: {tier}\n"
             f"Activities: {activities}\n"
             f"{age_str} | {cost_str}\n"
             f"Description: {desc}\n"
@@ -678,7 +591,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     if is_affirmative and last_filters:
         # Reuse last search filters but remove cost/age restrictions to broaden
-        filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style', 'gender')}
+        filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style')}
         combined = user_text
     elif chat_history and is_pure_refinement:
         recent = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
@@ -702,9 +615,6 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # Step 5: Build fallback note for Gemini
     fallback_note = ""
     activity_label = filters.get('activity','') or ''
-    gender_filter  = filters.get('gender','') or ''
-    age_filter     = filters.get('age')
-
     if fallback == 'no_activity_in_region':
         fallback_note = (f"IMPORTANT: No camps specifically offering '{activity_label}' were found near {region}. "
                         f"The camps shown are in {region} but do NOT specifically offer '{activity_label}'. "
@@ -721,25 +631,6 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                         f"Showing other camps in {province}. Be honest about the mismatch.")
     elif fallback == 'no_match':
         fallback_note = "Note: No exact matches found, showing top available member camps."
-
-    # Build gender/age enforcement note
-    gender_note = ""
-    if gender_filter == 'girls':
-        gender_note = ("GENDER RULE: The user requested all-girls camps ONLY. "
-                       "EXCLUDE any camp whose Gender field is 'Co-ed', 'Boys', or blank. "
-                       "Only include camps whose Gender field says 'girls' or 'Girls'. "
-                       "If no girls-only camps match, say so honestly.")
-    elif gender_filter == 'boys':
-        gender_note = ("GENDER RULE: The user requested all-boys camps ONLY. "
-                       "EXCLUDE any camp whose Gender field is 'Co-ed', 'Girls', or blank. "
-                       "Only include camps whose Gender field says 'boys' or 'Boys'. "
-                       "If no boys-only camps match, say so honestly.")
-
-    age_note = ""
-    if age_filter:
-        age_note = (f"AGE RULE: The user's child is {age_filter} years old. "
-                    f"ONLY include camps where Ages min <= {age_filter} AND Ages max >= {age_filter}. "
-                    f"Do NOT recommend camps where the age range does not include {age_filter}.")
 
     # Step 6: Gemini writes the full consultant response
     user_name = filters.get('name', '')
@@ -763,10 +654,6 @@ Extracted search criteria: {filters}
 
 {fallback_note}
 
-{gender_note}
-
-{age_note}
-
 Available camps from our verified member database:
 {camp_context}
 
@@ -775,7 +662,6 @@ CRITICAL RULES:
 - Only recommend camps that genuinely match what the user asked for
 - If the fallback note says camps do NOT match the request, say so honestly
 - Never suggest an unrelated camp "might" offer something it clearly doesn't
-- STRICTLY obey any GENDER RULE and AGE RULE above — exclude camps that don't qualify
 - For dietary needs (gluten-free, nut-free etc): if no specific camps found, honestly say so and advise contacting camps directly
 - Include for each RELEVANT camp:
 - Format EVERY camp exactly like this — no exceptions:
@@ -783,7 +669,7 @@ CRITICAL RULES:
      * Location: Region, Province
      * Why it fits: one sentence specific to the user's request
      * Ages: X-Y | Cost: $min-$max/week
-     * Type: Day Camp or Overnight Camp | Gender: [gender from data]
+     * Type: Day Camp or Overnight Camp
 - Use the exact MARKDOWN_LINK value from each camp's context for the clickable link
 - List ALL matching camps in this format
 - After the full list, add one short sentence offering to refine"""
