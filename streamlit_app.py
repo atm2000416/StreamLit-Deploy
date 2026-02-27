@@ -664,10 +664,14 @@ CRITICAL RULES:
 - Never suggest an unrelated camp "might" offer something it clearly doesn't
 - For dietary needs (gluten-free, nut-free etc): if no specific camps found, honestly say so and advise contacting camps directly
 - Include for each RELEVANT camp:
-- List ALL matching camps in this compact one-line format:
-  **[Camp Name](url)** — Day/Overnight, Region | Ages X-Y | $min-$max/week | brief reason it fits
-- IMPORTANT: Use the exact URL from each camp's 'MARKDOWN_LINK' field — copy it exactly as [Name](url)
-- Do not use sub-bullets or multi-line entries per camp — one line per camp only
+- Format EVERY camp exactly like this — no exceptions:
+  * **[Camp Name](url)**
+     * Location: Region, Province
+     * Why it fits: one sentence specific to the user's request
+     * Ages: X-Y | Cost: $min-$max/week
+     * Type: Day Camp or Overnight Camp
+- Use the exact MARKDOWN_LINK value from each camp's context for the clickable link
+- List ALL matching camps in this format
 - After the full list, add one short sentence offering to refine"""
 
     response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=4000)
@@ -691,30 +695,360 @@ CRITICAL RULES:
 
 
 # ═════════════════════════════════════════════
-# STREAMLIT UI
+# STREAMLIT UI — camps.ca look & feel
 # ═════════════════════════════════════════════
-st.set_page_config(page_title="Camp Discovery", page_icon="🏕️", layout="wide")
+st.set_page_config(
+    page_title="Camp Finder | camps.ca",
+    page_icon="🏕️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.markdown("""
 <style>
-    .camp-header {
-        text-align: center; padding: 2rem;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 1rem; margin-bottom: 2rem; color: white;
-    }
-    .consultant-form {
-        background: #f8f9fa; border-radius: 1rem;
-        padding: 1.5rem; margin-bottom: 1rem;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800;900&family=Source+Sans+3:wght@400;500;600&display=swap');
+
+/* ── Reset & base ─────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, [class*="css"] {
+    font-family: 'Source Sans 3', sans-serif;
+    background: #f5f6f8;
+    color: #2c3e50;
+}
+#MainMenu, footer, header { visibility: hidden; }
+.block-container {
+    padding: 0 !important;
+    max-width: 100% !important;
+}
+section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
+
+/* ── Topbar ───────────────────────────────── */
+.topbar {
+    background: #1b5e20;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1.5rem;
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+}
+.topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.topbar-logo {
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 900;
+    font-size: 1.4rem;
+    color: #fff;
+    letter-spacing: -0.5px;
+    text-decoration: none;
+}
+.topbar-logo em {
+    color: #f9a825;
+    font-style: normal;
+}
+.topbar-badge {
+    background: #f9a825;
+    color: #1b5e20;
+    font-size: 0.6rem;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+.topbar-right {
+    font-size: 0.75rem;
+    color: rgba(255,255,255,0.7);
+    font-weight: 500;
+}
+.topbar-right strong { color: #fff; }
+
+/* ── Hero ─────────────────────────────────── */
+.hero {
+    background: linear-gradient(160deg, #2e7d32 0%, #388e3c 45%, #43a047 100%);
+    padding: 2rem 2rem 1.8rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+}
+.hero::after {
+    content: '';
+    position: absolute;
+    bottom: -1px; left: 0; right: 0;
+    height: 28px;
+    background: #f5f6f8;
+    clip-path: ellipse(55% 100% at 50% 100%);
+}
+.hero-inner { position: relative; z-index: 1; }
+.hero h1 {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 1.9rem;
+    font-weight: 900;
+    color: #fff;
+    margin: 0 0 0.4rem;
+    letter-spacing: -0.5px;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+.hero-sub {
+    color: rgba(255,255,255,0.88);
+    font-size: 0.95rem;
+    font-weight: 500;
+    margin: 0 0 1rem;
+}
+.hero-pills {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+}
+.pill {
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.35);
+    color: #fff;
+    padding: 0.25rem 0.7rem;
+    border-radius: 20px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: default;
+    transition: background 0.2s;
+}
+.pill:hover { background: rgba(255,255,255,0.28); }
+
+/* ── Sidebar ──────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: #fff !important;
+    border-right: 1px solid #e0e4ea;
+}
+.sb-head {
+    background: #1b5e20;
+    color: #fff;
+    padding: 0.9rem 1rem;
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 800;
+    font-size: 0.95rem;
+    border-radius: 0 0 10px 10px;
+    margin: 0 -0.5rem 1rem;
+    text-align: center;
+    letter-spacing: 0.2px;
+}
+.sb-section {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 0.72rem;
+    font-weight: 800;
+    color: #1b5e20;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin: 1rem 0 0.35rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 2px solid #e8f5e9;
+}
+
+/* ── Streamlit widgets override ─────────────── */
+.stTextInput > label,
+.stSelectbox > label,
+.stRadio > label {
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    color: #37474f !important;
+}
+.stTextInput input {
+    border: 1.5px solid #c8e6c9 !important;
+    border-radius: 7px !important;
+    font-size: 0.88rem !important;
+    padding: 0.4rem 0.7rem !important;
+}
+.stTextInput input:focus {
+    border-color: #2e7d32 !important;
+    box-shadow: 0 0 0 2px rgba(46,125,50,0.12) !important;
+    outline: none !important;
+}
+.stSelectbox > div > div {
+    border: 1.5px solid #c8e6c9 !important;
+    border-radius: 7px !important;
+    font-size: 0.88rem !important;
+}
+div[data-testid="stRadio"] > div {
+    gap: 0.3rem !important;
+}
+
+/* ── Find button ────────────────────────────── */
+.stFormSubmitButton > button {
+    background: linear-gradient(135deg, #2e7d32, #388e3c) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 25px !important;
+    font-family: 'Montserrat', sans-serif !important;
+    font-weight: 800 !important;
+    font-size: 0.95rem !important;
+    padding: 0.6rem 1.2rem !important;
+    width: 100% !important;
+    letter-spacing: 0.3px !important;
+    box-shadow: 0 3px 10px rgba(46,125,50,0.35) !important;
+    transition: all 0.2s ease !important;
+    cursor: pointer !important;
+}
+.stFormSubmitButton > button:hover {
+    background: linear-gradient(135deg, #1b5e20, #2e7d32) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 5px 16px rgba(46,125,50,0.45) !important;
+}
+
+/* ── Clear / secondary buttons ─────────────── */
+div.stButton > button {
+    background: #fff !important;
+    color: #2e7d32 !important;
+    border: 1.5px solid #2e7d32 !important;
+    border-radius: 20px !important;
+    font-family: 'Montserrat', sans-serif !important;
+    font-weight: 700 !important;
+    font-size: 0.82rem !important;
+    padding: 0.35rem 0.9rem !important;
+    transition: all 0.18s !important;
+}
+div.stButton > button:hover {
+    background: #e8f5e9 !important;
+    border-color: #1b5e20 !important;
+    color: #1b5e20 !important;
+}
+
+/* ── Metric cards ───────────────────────────── */
+[data-testid="stMetric"] {
+    background: #e8f5e9 !important;
+    border: 1px solid #c8e6c9 !important;
+    border-radius: 8px !important;
+    padding: 0.5rem 0.7rem !important;
+    text-align: center !important;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 0.7rem !important;
+    color: #558b2f !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+}
+[data-testid="stMetricValue"] {
+    font-family: 'Montserrat', sans-serif !important;
+    font-weight: 900 !important;
+    color: #1b5e20 !important;
+    font-size: 1.4rem !important;
+}
+
+/* ── Chat messages ───────────────────────────── */
+.main-chat {
+    max-width: 860px;
+    margin: 1.5rem auto 6rem;
+    padding: 0 1.2rem;
+}
+[data-testid="stChatMessage"] {
+    background: #fff !important;
+    border: 1px solid #e5eaef !important;
+    border-radius: 12px !important;
+    padding: 1rem 1.2rem !important;
+    margin-bottom: 0.8rem !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05) !important;
+}
+/* Assistant message — left green accent */
+[data-testid="stChatMessage"][data-testid*="assistant"],
+div[class*="stChatMessage"]:has(img[alt="assistant"]) {
+    border-left: 4px solid #2e7d32 !important;
+}
+
+/* ── Chat input bar ──────────────────────────── */
+[data-testid="stChatInput"] textarea {
+    border: 2px solid #c8e6c9 !important;
+    border-radius: 25px !important;
+    font-family: 'Source Sans 3', sans-serif !important;
+    font-size: 0.92rem !important;
+    padding: 0.55rem 1.1rem !important;
+    transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+[data-testid="stChatInput"] textarea:focus {
+    border-color: #2e7d32 !important;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.12) !important;
+    outline: none !important;
+}
+
+/* ── Links ───────────────────────────────────── */
+a { color: #2e7d32 !important; font-weight: 600 !important; }
+a:hover { color: #1b5e20 !important; text-decoration: underline !important; }
+
+/* ── Caption / footnote ─────────────────────── */
+.stCaption {
+    color: #78909c !important;
+    font-size: 0.72rem !important;
+}
+
+/* ── Divider ─────────────────────────────────── */
+hr { border-color: #e8edf2 !important; margin: 0.8rem 0 !important; }
+
+/* ── Verified badge ─────────────────────────── */
+.verified-banner {
+    background: #e8f5e9;
+    border: 1px solid #a5d6a7;
+    border-radius: 6px;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.73rem;
+    color: #2e7d32;
+    font-weight: 600;
+    text-align: center;
+    line-height: 1.5;
+    margin-top: 0.5rem;
+}
+
+/* ── Spinner ─────────────────────────────────── */
+.stSpinner > div { border-top-color: #2e7d32 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="camp-header"><h1>🏕️ Camp Discovery</h1><p>Your Personal Canadian Camp Consultant</p></div>', unsafe_allow_html=True)
+# ── Topbar ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="topbar">
+    <div class="topbar-left">
+        <span class="topbar-logo">🏕️ camps<em>.ca</em></span>
+        <span class="topbar-badge">AI Powered</span>
+    </div>
+    <div class="topbar-right">
+        Canada's Camp Discovery Platform &nbsp;|&nbsp;
+        <strong>Verified Member Camps Only</strong>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
+# ── Hero ──────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+  <div class="hero-inner">
+    <h1>Find Your Perfect Canadian Camp 🍁</h1>
+    <p class="hero-sub">
+      Search thousands of verified day &amp; overnight camps across Canada
+    </p>
+    <div class="hero-pills">
+      <span class="pill">🏒 Hockey</span>
+      <span class="pill">💻 STEM</span>
+      <span class="pill">🎨 Arts</span>
+      <span class="pill">⚽ Sports</span>
+      <span class="pill">🌲 Outdoor</span>
+      <span class="pill">🎭 Theatre</span>
+      <span class="pill">🏊 Swimming</span>
+      <span class="pill">🎸 Music</span>
+      <span class="pill">🐴 Equestrian</span>
+      <span class="pill">🤖 Robotics</span>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Config & data ─────────────────────────────────────────────────────────────
 config = get_config()
 required = ["GEMINI_API_KEY", "PINECONE_API_KEY", "DB_HOST", "DB_USER", "DB_PASS", "INDEX_HOST"]
 missing = [k for k in required if not config.get(k)]
-
 if missing:
     st.error(f"⚠️ Missing configuration: {', '.join(missing)}")
     st.stop()
@@ -722,40 +1056,52 @@ if missing:
 with st.spinner("Loading member camps..."):
     client_camps = load_client_camps(config)
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("🏕️ Camp Consultant")
-    st.markdown("Tell us about yourself and we'll find the perfect camp!")
-    st.divider()
+    st.markdown('<div class="sb-head">🔍 Camp Search Consultant</div>', unsafe_allow_html=True)
 
-    # Consultation intake form
     with st.form("consultation_form"):
-        st.subheader("👤 About You")
+        st.markdown('<div class="sb-section">👤 About You</div>', unsafe_allow_html=True)
         contact_name = st.text_input("Your name", placeholder="e.g. Sarah")
-        region_camp  = st.text_input("Your region / city", placeholder="e.g. Toronto, Ottawa, Vancouver")
-        st.subheader("🏕️ Camp Preferences")
-        category_options = ["Any", "STEM / Science / Technology", "Sports", "Arts / Music / Dance",
-                            "Outdoor / Adventure", "Academic / Tutoring", "Language / French",
-                            "Equestrian / Riding", "Cooking / Chef", "Leadership", "Traditional"]
-        category_camp = st.selectbox("Type of camp", category_options)
+        region_camp  = st.text_input("City or region", placeholder="e.g. Toronto, Ottawa, Vancouver")
+
+        st.markdown('<div class="sb-section">🏕️ Camp Preferences</div>', unsafe_allow_html=True)
+        category_options = [
+            "Any", "STEM / Science / Technology", "Sports",
+            "Arts / Music / Dance", "Outdoor / Adventure",
+            "Academic / Tutoring", "Language / French",
+            "Equestrian / Riding", "Cooking / Chef",
+            "Leadership", "Traditional / Multi-Activity",
+            "Special Needs / Adapted"
+        ]
+        category_camp = st.selectbox("Camp category", category_options)
         camp_type     = st.text_input("Specific activity", placeholder="e.g. robotics, hockey, painting")
-        date_camp     = st.text_input("Preferred dates / season", placeholder="e.g. July, Summer 2025, Week of Aug 4")
-        costs_camp    = st.text_input("Max budget per week", placeholder="e.g. $500, $800")
-        age_child     = st.text_input("Child's age(s)", placeholder="e.g. 10, 8 and 12")
-        overnight     = st.radio("Camp style", ["Either", "Day camp", "Overnight camp"])
-        submitted     = st.form_submit_button("🔍 Find My Camp!", use_container_width=True)
+        age_child     = st.text_input("Child's age(s)", placeholder="e.g. 10, or 8 and 12")
+        costs_camp    = st.text_input("Max weekly budget", placeholder="e.g. $500")
+        date_camp     = st.text_input("Preferred dates", placeholder="e.g. July, Summer 2026")
+        overnight     = st.radio("Camp style", ["Either", "Day camp", "Overnight camp"], horizontal=True)
+        submitted     = st.form_submit_button("🔍  Find My Camp!", use_container_width=True)
 
     st.divider()
-    with st.expander("📊 Network Stats"):
-        st.metric("Member Camps", f"{len(client_camps):,}")
-        st.caption("✅ Verified member camps only")
-        st.caption("🔗 All camps have verified URLs")
 
-    if st.button("🗑️ Clear Chat", use_container_width=True):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Camps", f"{len(client_camps):,}")
+    with col2:
+        st.metric("Provinces", "13")
+
+    if st.button("🗑️  New Search", use_container_width=True):
         st.session_state.messages = []
         st.session_state.consultation_done = False
         st.session_state.last_filters = None
         st.rerun()
+
+    st.markdown("""
+    <div class="verified-banner">
+        ✅ All results are verified members of<br>
+        <strong>camps.ca</strong> &amp; <strong>ourkids.net</strong>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -765,13 +1111,12 @@ if "consultation_done" not in st.session_state:
 if "last_filters" not in st.session_state:
     st.session_state.last_filters = None
 
-# ── Handle consultation form submission ───────────────────────────────────────
+# ── Consultation form handler ─────────────────────────────────────────────────
 if submitted and contact_name and region_camp:
-    # Build a rich structured query from the form
-    style_text = "" if overnight == "Either" else overnight.lower()
+    style_text  = "" if overnight == "Either" else overnight.lower()
     budget_text = f"under {costs_camp} per week" if costs_camp else ""
     age_text    = f"for a {age_child}-year-old" if age_child else ""
-    type_text   = camp_type if camp_type else category_camp if category_camp != "Any" else "general"
+    type_text   = camp_type if camp_type else (category_camp if category_camp != "Any" else "general")
     date_text   = f"around {date_camp}" if date_camp else "this summer"
 
     structured_query = (
@@ -780,90 +1125,85 @@ if submitted and contact_name and region_camp:
     ).replace("  ", " ").strip()
 
     welcome = (
-        f"Hi {contact_name}! 👋 Great to meet you! I'm your personal camp consultant and "
-        f"I'll find the best camps for you in **{region_camp}**.\n\n"
-        f"Let me search our verified member network now... 🔍"
+        f"Hi **{contact_name}**! 👋 Great to have you here.\n\n"
+        f"I'm your personal camp consultant at **camps.ca** — Canada's #1 verified camp network.\n\n"
+        f"Let me search our member database for the best **{type_text}** camps in **{region_camp}** for you... 🔍"
     )
-
-    st.session_state.messages = [{"role": "assistant", "content": welcome}]
-    st.session_state.messages.append({"role": "user", "content": structured_query})
+    st.session_state.messages = [
+        {"role": "assistant", "content": welcome},
+        {"role": "user",      "content": structured_query}
+    ]
     st.session_state.consultation_done = False
     st.rerun()
 
-# ── Welcome message if no messages yet ───────────────────────────────────────
+# ── Welcome message ───────────────────────────────────────────────────────────
 if not st.session_state.messages:
     st.session_state.messages = [{
         "role": "assistant",
         "content": (
-            "👋 Welcome to Camp Discovery! I'm your personal Canadian camp consultant.\n\n"
-            "**To get started**, fill in the form on the left and I'll find the perfect camp for you! "
-            "Or just type your search below.\n\n"
-            "💡 *Try: 'Show me STEM camps in Toronto for a 12-year-old under $500'*"
+            "👋 **Welcome to camps.ca Camp Finder!**\n\n"
+            "I'm your personal Canadian camp consultant. Use the panel on the left for guided search, "
+            "or type your question below.\n\n"
+            "**Try asking:**\n"
+            "- *Hockey camps in Toronto for a 10-year-old*\n"
+            "- *STEM day camps in Ottawa under $500/week*\n"
+            "- *Traditional overnight camps in Ontario*\n"
+            "- *Arts camps in Vancouver for teens*\n"
+            "- *Gluten-free camps in Mississauga*"
         )
     }]
 
-# ── Display chat history ──────────────────────────────────────────────────────
+# ── Render chat messages ──────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ── Process any pending user message ─────────────────────────────────────────
+# ── Process pending assistant response ───────────────────────────────────────
 last_msg = st.session_state.messages[-1] if st.session_state.messages else None
 if last_msg and last_msg["role"] == "user" and not st.session_state.consultation_done:
     with st.chat_message("assistant"):
-        with st.spinner("Searching member camps..."):
+        with st.spinner("🔍 Searching verified member camps..."):
             try:
                 response, elapsed, filters = process_query(
                     last_msg["content"], config, client_camps,
                     chat_history=st.session_state.messages,
                     last_filters=st.session_state.last_filters
                 )
-                st.session_state.last_filters = filters
-
-                # Append follow-up prompt after first consultation result
                 follow_up = (
                     "\n\n---\n"
-                    "🎯 **Now that you have your initial recommendations**, is there anything specific "
-                    "that matters most to you? For example:\n"
-                    "- A **different type** of camp activity\n"
-                    "- A **different region** or closer location\n"
-                    "- A specific **budget** range\n"
-                    "- A specific **age group** or dates\n\n"
-                    "Just let me know and I'll refine your results!"
+                    "💬 *Want to refine? I can filter by age, budget, dates, style, or activity — just ask!*"
                 )
-
                 full_response = response + follow_up
                 st.markdown(full_response)
-                st.caption(f"⚡ {elapsed:.1f}s • Verified member camps")
+                st.caption(f"⚡ {elapsed:.1f}s · Verified camps.ca member network")
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
                 st.session_state.consultation_done = True
-
+                st.session_state.last_filters = filters
             except Exception as e:
-                error = f"❌ Error: {str(e)[:300]}"
-                st.error(error)
-                st.session_state.messages.append({"role": "assistant", "content": error})
+                err = f"❌ Something went wrong: {str(e)[:300]}"
+                st.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
                 st.session_state.consultation_done = True
 
-# ── Free-text chat input ──────────────────────────────────────────────────────
-if prompt := st.chat_input("Refine your search or ask a follow-up question..."):
+# ── Chat input ────────────────────────────────────────────────────────────────
+if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto for a 10-year-old'"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.consultation_done = False
     with st.chat_message("user"):
         st.markdown(prompt)
-
     with st.chat_message("assistant"):
-        with st.spinner("Searching..."):
+        with st.spinner("🔍 Searching verified member camps..."):
             try:
                 response, elapsed, filters = process_query(
                     prompt, config, client_camps,
                     chat_history=st.session_state.messages,
                     last_filters=st.session_state.last_filters
                 )
-                st.session_state.last_filters = filters
                 st.markdown(response)
-                st.caption(f"⚡ {elapsed:.1f}s • Verified member camps")
+                st.caption(f"⚡ {elapsed:.1f}s · Verified camps.ca member network")
                 st.session_state.messages.append({"role": "assistant", "content": response})
+                st.session_state.last_filters = filters
             except Exception as e:
-                error = f"❌ Error: {str(e)[:300]}"
-                st.error(error)
-                st.session_state.messages.append({"role": "assistant", "content": error})
+                err = f"❌ Something went wrong: {str(e)[:300]}"
+                st.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
