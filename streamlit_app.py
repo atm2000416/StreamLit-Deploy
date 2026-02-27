@@ -642,28 +642,65 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
-    dietary_keywords = [
-        'vegetarian', 'vegan', 'kosher', 'halal', 'nut-free', 'nut free',
-        'allergy', 'gluten', 'peanut', 'dairy-free', 'dairy free',
-        'organic', 'plant-based',
+    from urllib.parse import quote_plus as qp
+
+    # Keywords that are ambiguous — could mean a camp type OR a dietary/lifestyle need
+    # For these we check the DB first, and if no results, ask a clarifying question
+    # rather than assuming one interpretation
+    ambiguous_keywords = [
+        'vegetarian', 'vegan', 'kosher', 'halal', 'organic',
+        'plant-based', 'gluten', 'gluten-free', 'gluten free',
+        'nut-free', 'nut free', 'peanut', 'dairy-free', 'dairy free',
+        'allergy', 'allergen',
     ]
     activity_raw = (filters.get('activity') or '').lower().strip()
     query_lower  = user_text.lower()
-    is_dietary   = (activity_raw in dietary_keywords or
-                    any(kw in query_lower for kw in dietary_keywords))
 
-    if not camps and is_dietary:
-        # Build camps.ca keyword search URL
-        from urllib.parse import urlencode, quote_plus as qp
-        search_term = activity_raw or next((kw for kw in dietary_keywords if kw in query_lower), 'camps')
-        search_url  = f"https://www.camps.ca/camp-site-search.php?keywrds={qp(search_term + ' camps')}"
-        camp_context = (
-            f"DIETARY_SEARCH: true\n"
-            f"SEARCH_URL: {search_url}\n"
-            f"SEARCH_TERM: {search_term}\n"
-            f"No '{search_term}' camps found in the member database. "            f"Direct the user to the camps.ca search page which may have more results."
+    # Detect if query contains an ambiguous keyword
+    matched_ambiguous = next(
+        (kw for kw in ambiguous_keywords if kw in query_lower or kw == activity_raw),
+        None
+    )
+
+    # Check if this looks like a bare ambiguous search (no location, age, or other context)
+    has_location  = bool(filters.get('province') or filters.get('region'))
+    has_age       = bool(filters.get('age'))
+    has_style     = bool(filters.get('style'))
+    is_bare_ambiguous = (
+        matched_ambiguous and
+        not has_location and not has_age and not has_style and
+        len(user_text.split()) <= 4  # short query like "vegetarian camps"
+    )
+
+    # If bare ambiguous query with no DB results → ask clarifying question
+    if not camps and is_bare_ambiguous:
+        elapsed = time.time() - start
+        search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={qp(matched_ambiguous + ' camps')}"
+        response = (
+            f"I want to make sure I find the right camps for you! When you say **'{matched_ambiguous} camps'**, do you mean:\n\n"
+            f"1. 🏕️ **Camps that specifically identify as {matched_ambiguous}** (e.g. a camp with a {matched_ambiguous} philosophy or program)\n"
+            f"2. 🥗 **Camps that accommodate {matched_ambiguous} dietary needs** for your child\n\n"
+            f"In the meantime, you can also browse our full directory here:\n"
+            f"🔍 [Search camps.ca for '{matched_ambiguous} camps']({search_url})\n\n"
+            f"*Just reply with 1 or 2, or add more details like location or your child's age and I'll search our member network!*"
         )
-    elif not camps:
+        return response, elapsed, filters
+
+    # If ambiguous keyword WITH context (location/age etc.) and no results → show search URL
+    if not camps and matched_ambiguous:
+        elapsed = time.time() - start
+        search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={qp(matched_ambiguous + ' camps')}"
+        response = (
+            f"I couldn't find camps in our verified member network specifically matching **{matched_ambiguous}**"
+            f"{' in ' + filters.get('region', filters.get('province', '')) if has_location else ''}.\n\n"
+            f"Many camps accommodate {matched_ambiguous} needs — we recommend contacting camps directly.\n\n"
+            f"You can also browse our full directory:\n"
+            f"🔍 [Search camps.ca for '{matched_ambiguous} camps']({search_url})\n\n"
+            f"💬 *Try searching by location, age, or activity type and I'll find verified member camps for you!*"
+        )
+        return response, elapsed, filters
+
+    if not camps:
         camp_context = "No camps found in the database matching these criteria."
     else:
         camp_context = format_camp_context(camps)
@@ -700,9 +737,8 @@ STRICT RULES:
 1. Only recommend camps from the provided database list — never invent or assume details
 2. Use ONLY the description text provided for each camp — do not add information from your training
 3. Always format camp names as clickable markdown links: [Camp Name](url)
-4. If context contains DIETARY_SEARCH: true, tell the user no matching camps were found in our
-   member network for that dietary need, then say: "You can search our full directory at:
-   [camps.ca search](SEARCH_URL_HERE)" — use the actual SEARCH_URL value from the context above as the link URL.
+4. If the user's query is ambiguous (e.g. "vegetarian camps" could mean a camp type OR dietary need),
+   and no camps were found, ask a clarifying follow-up question rather than assuming one interpretation.
 5. Never show gender-filtered results as co-ed. If gender=girls, all results are girls-only camps.
 4. If fallback note says camps don't match request, say so honestly — never force relevance
 5. All camps are verified members of camps.ca network
@@ -722,7 +758,7 @@ CRITICAL RULES:
 - Only recommend camps that genuinely match what the user asked for
 - If the fallback note says camps do NOT match the request, say so honestly
 - Never suggest an unrelated camp "might" offer something it clearly doesn't
-- For dietary needs (gluten-free, nut-free etc): if no specific camps found, honestly say so and advise contacting camps directly
+- For ambiguous searches (vegetarian, vegan, kosher etc): ask a clarifying question — don't assume it means dietary need vs. camp type
 - Include for each RELEVANT camp:
 - Format EVERY camp exactly like this — no exceptions:
   * **[Camp Name](url)**
