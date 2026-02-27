@@ -213,7 +213,8 @@ Return ONLY a valid JSON object with these fields (use null if not mentioned):
   "age": integer or null,
   "max_cost": integer or null,
   "style": "day" or "overnight" or null,
-  "name": "user first name if mentioned or null"
+  "name": "user first name if mentioned or null",
+  "gender": "girls" or "boys" or null
 }
 Province must be one of: British Columbia, Alberta, Ontario, Quebec, Manitoba, Saskatchewan, Nova Scotia, New Brunswick, Prince Edward Island, Newfoundland and Labrador.
 For cities, set region to the city name and infer the province.
@@ -224,13 +225,19 @@ Examples:
 - "mississauga" → province: "Ontario", region: "Halton - Peel"
 - "debate camps" → activity: "debate"
 - "hockey" → activity: "hockey"
+- "cheer" or "cheerleading" → activity: "cheer"
+- "fashion" or "fashion design" → activity: "fashion"
 - "gluten free" → activity: "gluten"
+- "vegetarian" or "kosher" or "halal" → activity: "vegetarian" (dietary keyword)
 - "special needs" → activity: "special needs"
 - "autism" → activity: "autism"
 - "under $500" → max_cost: 500
 - "10 year old" → age: 10
 - "teens" → age: 15
 - "my name is Sarah" → name: "Sarah"
+- "all-girls" or "girls only" or "girls camp" or "for girls" → gender: "girls"
+- "all-boys" or "boys only" or "boys camp" or "for boys" → gender: "boys"
+- no gender mention → gender: null
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
     result = call_gemini(system, user_text, api_key, max_tokens=200)
@@ -290,6 +297,7 @@ def search_camps(filters, config, limit=100):
     age      = filters.get('age')
     max_cost = filters.get('max_cost')
     style    = filters.get('style')
+    gender   = filters.get('gender')  # 'girls', 'boys', or None
 
     # Resolve region/city to province if not set
     region_lower = (region or '').lower().strip()
@@ -371,6 +379,13 @@ def search_camps(filters, config, limit=100):
             'leadership':   [33, 79, 88],
             'special needs':[252],
             'wellness':     [91],
+            # Cheer & Fashion
+            'cheer':        [164],
+            'cheerleading': [164],
+            'cheering':     [164],
+            'fashion':      [71, 172, 264],
+            'fashion design':[71, 264],
+            'beauty':       [172],
         }
         act_lower = activity.lower().strip()
         codes = activity_codes.get(act_lower, [])
@@ -379,7 +394,7 @@ def search_camps(filters, config, limit=100):
             # FIND_IN_SET for known activities + text fallback for variants
             # Use specialty codes for known activities — exact match on sessions_clean.specialty
             code_list = ",".join(str(c) for c in codes)
-            conditions.append(f"sc.specialty IN ({code_list})")
+            conditions.append(f"(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))")
         else:
             # Unknown activity — search class_name text
             conditions.append(
@@ -400,15 +415,22 @@ def search_camps(filters, config, limit=100):
         conditions.append("sc.camp_style = :style")
         params['style'] = style
 
+    if gender == 'girls':
+        conditions.append("sc.gender = 2")
+    elif gender == 'boys':
+        conditions.append("sc.gender = 3")
+
     where = " AND ".join(conditions)
     sql = f"""SELECT
             sc.cid, sc.camp_name, sc.province,
             MIN(sc.region)                  AS region,
             sc.camp_style, sc.listing_tier, sc.camp_url,
+            MIN(sc.session_url)             AS session_url,
             MIN(sc.age_from)                AS age_min,
             MAX(sc.age_to)                  AS age_max,
             MIN(NULLIF(sc.cost_from,0))     AS cost_min,
             MAX(NULLIF(sc.cost_to,0))       AS cost_max,
+            COUNT(DISTINCT sc.session_id)   AS session_count,
             GROUP_CONCAT(DISTINCT sc.specialty_label
                 ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
             cc.description
@@ -437,8 +459,10 @@ def search_camps(filters, config, limit=100):
                 conds_no_act  = [c for c in conditions if 'specialty' not in c and 'class_name' not in c]
                 sql_f1 = f"""SELECT sc.cid, sc.camp_name, sc.province,
                         MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
+                        MIN(sc.session_url) AS session_url,
                         MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
                         MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
+                        COUNT(DISTINCT sc.session_id) AS session_count,
                         GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
                         cc.description
                     FROM camp_directory.sessions_clean sc
@@ -459,8 +483,10 @@ def search_camps(filters, config, limit=100):
                 conds_no_reg  = [c for c in conditions if 'region' not in c]
                 sql_f2 = f"""SELECT sc.cid, sc.camp_name, sc.province,
                         MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
+                        MIN(sc.session_url) AS session_url,
                         MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
                         MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
+                        COUNT(DISTINCT sc.session_id) AS session_count,
                         GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
                         cc.description
                     FROM camp_directory.sessions_clean sc
@@ -480,8 +506,10 @@ def search_camps(filters, config, limit=100):
                 r3 = conn.execute(text(
                     "SELECT sc.cid, sc.camp_name, sc.province, MIN(sc.region) AS region, "
                     "sc.camp_style, sc.listing_tier, sc.camp_url, "
+                    "MIN(sc.session_url) AS session_url, "
                     "MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max, "
                     "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
+                    "COUNT(DISTINCT sc.session_id) AS session_count, "
                     "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
                     "cc.description "
                     "FROM camp_directory.sessions_clean sc "
@@ -498,8 +526,10 @@ def search_camps(filters, config, limit=100):
             r4 = conn.execute(text(
                 "SELECT sc.cid, sc.camp_name, sc.province, MIN(sc.region) AS region, "
                 "sc.camp_style, sc.listing_tier, sc.camp_url, "
+                "MIN(sc.session_url) AS session_url, "
                 "MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max, "
                 "MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max, "
+                "COUNT(DISTINCT sc.session_id) AS session_count, "
                 "GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities, "
                 "cc.description "
                 "FROM camp_directory.sessions_clean sc "
@@ -540,8 +570,12 @@ def format_camp_context(camps):
             deduped.append(c)
     lines = []
     for c in deduped:
-        name      = c.get('camp_name', '')
-        url       = c.get('camp_url', '')
+        name         = c.get('camp_name', '')
+        session_count = c.get('session_count', 0) or 0
+        session_url   = c.get('session_url', '')
+        camp_url      = c.get('camp_url', '')
+        # Link directly to the specific session when only 1 matched
+        url           = session_url if (session_count == 1 and session_url) else camp_url
         province  = c.get('province', '')
         region    = c.get('region', '')
         style     = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
@@ -607,7 +641,29 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     camps, province, region, fallback = search_camps(filters, config)
 
     # Step 4: Build context string for Gemini
-    if not camps:
+    # For dietary/niche keywords with no results, return a camps.ca search URL
+    dietary_keywords = [
+        'vegetarian', 'vegan', 'kosher', 'halal', 'nut-free', 'nut free',
+        'allergy', 'gluten', 'peanut', 'dairy-free', 'dairy free',
+        'organic', 'plant-based',
+    ]
+    activity_raw = (filters.get('activity') or '').lower().strip()
+    query_lower  = user_text.lower()
+    is_dietary   = (activity_raw in dietary_keywords or
+                    any(kw in query_lower for kw in dietary_keywords))
+
+    if not camps and is_dietary:
+        # Build camps.ca keyword search URL
+        from urllib.parse import urlencode, quote_plus as qp
+        search_term = activity_raw or next((kw for kw in dietary_keywords if kw in query_lower), 'camps')
+        search_url  = f"https://www.camps.ca/camp-site-search.php?keywrds={qp(search_term + ' camps')}"
+        camp_context = (
+            f"DIETARY_SEARCH: true\n"
+            f"SEARCH_URL: {search_url}\n"
+            f"SEARCH_TERM: {search_term}\n"
+            f"No '{search_term}' camps found in the member database. "            f"Direct the user to the camps.ca search page which may have more results."
+        )
+    elif not camps:
         camp_context = "No camps found in the database matching these criteria."
     else:
         camp_context = format_camp_context(camps)
@@ -644,6 +700,10 @@ STRICT RULES:
 1. Only recommend camps from the provided database list — never invent or assume details
 2. Use ONLY the description text provided for each camp — do not add information from your training
 3. Always format camp names as clickable markdown links: [Camp Name](url)
+4. If context contains DIETARY_SEARCH: true, tell the user no matching camps were found in our
+   member network for that dietary need, then say: "You can search our full directory at:
+   [camps.ca search]({SEARCH_URL})" — replace {SEARCH_URL} with the actual SEARCH_URL value from context.
+5. Never show gender-filtered results as co-ed. If gender=girls, all results are girls-only camps.
 4. If fallback note says camps don't match request, say so honestly — never force relevance
 5. All camps are verified members of camps.ca network
 6. Never say a camp "might" offer something unless it's in the provided description"""
