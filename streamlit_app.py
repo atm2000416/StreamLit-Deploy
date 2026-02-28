@@ -636,34 +636,67 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     start = time.time()
 
     # Step 1: Determine if this is a refinement or a fresh query
-    # Fresh query = has new location OR new activity topic → no history bleed
-    # Refinement = "show more", "under $X", "day camps only" → carry context
+    text_lower_check = user_text.lower().strip()
+
+    # Short single-word affirmatives with no new info — just reuse last filters wholesale
+    affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
+    is_affirmative = text_lower_check.rstrip('!.') in affirmatives
+
+    # Detect if the AI's last message was a clarifying question
+    # (ends with '?') AND user is providing a short answer like "yes, i am from alberta"
+    # In this case: extract NEW filters from user reply, then MERGE into last_filters
+    last_assistant_msg = ''
+    if chat_history:
+        for m in reversed(chat_history):
+            if m['role'] == 'assistant':
+                last_assistant_msg = m['content'].strip()
+                break
+    ai_asked_question = last_assistant_msg.rstrip().endswith('?')
+
+    # Detect purely additive refinements (no new topic/activity)
     refinement_only_phrases = [
         'show more', 'more options', 'any others', 'what else',
         'day camps only', 'overnight only', 'just day', 'just overnight',
         'cheaper', 'less expensive', 'more affordable',
         'closer', 'nearer', 'same area',
     ]
-    text_lower_check = user_text.lower()
     is_pure_refinement = any(p in text_lower_check for p in refinement_only_phrases)
 
-    # Short affirmative replies ("sure", "yes", "ok", "show me more") — reuse last filters
-    affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
-    is_affirmative = user_text.lower().strip().rstrip('!.') in affirmatives
+    # Detect location words — signal that province/region is being added
+    location_words = [
+        'ontario', 'quebec', 'bc', 'british columbia', 'alberta', 'manitoba',
+        'saskatchewan', 'nova scotia', 'new brunswick', 'pei', 'newfoundland',
+        'toronto', 'vancouver', 'calgary', 'edmonton', 'ottawa', 'montreal',
+        'i am from', 'i\'m from', 'we are in', 'we\'re in', 'located in', 'near',
+    ]
+    is_location_reply = any(w in text_lower_check for w in location_words)
 
     if is_affirmative and last_filters:
-        # Reuse last search filters but remove cost/age restrictions to broaden
-        filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style')}
+        # Pure "yes/sure" — reuse filters as-is
+        filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
         combined = user_text
+
+    elif last_filters and (ai_asked_question or is_pure_refinement or is_location_reply):
+        # AI asked a follow-up question OR user is adding location/refinement detail
+        # → Extract new filters from user reply, then MERGE into last_filters
+        # last_filters wins for keys the new reply doesn't mention (preserves overnight, girls, etc.)
+        new_filters = extract_filters(user_text, config["GEMINI_API_KEY"])
+        filters = {**last_filters, **{k: v for k, v in new_filters.items() if v is not None}}
+        combined = user_text
+
     elif chat_history and is_pure_refinement:
         recent = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
         combined = " ".join(recent + [user_text])
+
     else:
-        # Fresh query — use current message only, no history bleed
+        # Genuine fresh query — no prior context
         combined = user_text
 
-    # Step 2: Extract filters using Gemini
-    filters = extract_filters(combined, config["GEMINI_API_KEY"]) if not (is_affirmative and last_filters) else filters
+    # Step 2: Extract filters using Gemini (skip if already set above)
+    if 'filters' not in dir():
+        filters = {}
+    if not (is_affirmative and last_filters) and not (last_filters and (ai_asked_question or is_location_reply)):
+        filters = extract_filters(combined, config["GEMINI_API_KEY"])
 
     # Step 3: Fetch matching camps from camps_clean
     camps, province, region, fallback = search_camps(filters, config)
@@ -804,7 +837,8 @@ CRITICAL RULES:
 - Keep Why it fits to 1-2 punchy sentences. No corporate language. Sound like you've seen these programs firsthand.
 - EXCLUSION RULE: If a camp's MATCHING_PROGRAMS is empty or null, exclude it from results entirely
 - List ALL camps that have matching programs
-- After the full list, add one short sentence offering to refine"""
+- After the full list, end with ONE short question to help narrow down further — e.g. "Want me to filter by age or location?" This question MUST end with a single '?' and nothing after it.
+- CRITICAL: Never ask multiple questions. One question maximum, at the very end."""
 
     response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=4000)
 
