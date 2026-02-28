@@ -250,7 +250,7 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         return {}
 
 
-def search_camps(filters, config, limit=100, named_camp=None):
+def search_camps(filters, config, limit=20, named_camp=None):
     """Query sessions_clean joined to camps_clean for session-level precision"""
     from sqlalchemy import create_engine, text
 
@@ -975,8 +975,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         )
         return response, elapsed, filters
 
-    # Step 4: Deduplicate, generate blurbs, render — Python controls the list
-    deduped = dedupe_camps(camps) if camps else []
+    # Step 4: Deduplicate then enforce gold-first cap — gold always included
+    raw_deduped = dedupe_camps(camps) if camps else []
+    gold  = [c for c in raw_deduped if c.get('listing_tier') == 'gold']
+    other = [c for c in raw_deduped if c.get('listing_tier') != 'gold']
+    deduped = gold + other[:max(0, 8 - len(gold))]  # all gold + up to 8 total
 
     if not deduped:
         elapsed = time.time() - start
