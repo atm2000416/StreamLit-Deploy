@@ -948,10 +948,18 @@ section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
     border-radius: 20px;
     font-size: 0.78rem;
     font-weight: 600;
-    cursor: default;
-    transition: background 0.2s;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.15s;
+    text-decoration: none;
+    display: inline-block;
 }
-.pill:hover { background: rgba(255,255,255,0.28); }
+.pill:hover {
+    background: rgba(255,255,255,0.32);
+    transform: translateY(-1px);
+    text-decoration: none;
+    color: #fff;
+}
+.pill:visited { color: #fff; }
 
 /* ── Sidebar ──────────────────────────────── */
 [data-testid="stSidebar"] {
@@ -1162,16 +1170,16 @@ st.markdown("""
       Search thousands of verified day &amp; overnight camps across Canada
     </p>
     <div class="hero-pills">
-      <span class="pill">🏒 Hockey</span>
-      <span class="pill">💻 STEM</span>
-      <span class="pill">🎨 Arts</span>
-      <span class="pill">⚽ Sports</span>
-      <span class="pill">🌲 Outdoor</span>
-      <span class="pill">🎭 Theatre</span>
-      <span class="pill">🏊 Swimming</span>
-      <span class="pill">🎸 Music</span>
-      <span class="pill">🐴 Equestrian</span>
-      <span class="pill">🤖 Robotics</span>
+      <a class="pill" href="https://www.camps.ca/hockey_schools_camps.php" target="_blank">🏒 Hockey</a>
+      <a class="pill" href="https://www.camps.ca/stem-camps.php" target="_blank">💻 STEM</a>
+      <a class="pill" href="https://www.camps.ca/fine_art_camps.php" target="_blank">🎨 Arts</a>
+      <a class="pill" href="https://www.camps.ca/toronto_camps.php" target="_blank">⚽ Sports</a>
+      <a class="pill" href="https://www.camps.ca/outdoor-education.php" target="_blank">🌲 Outdoor</a>
+      <a class="pill" href="https://www.camps.ca/musical-theatre-camps.php" target="_blank">🎭 Theatre</a>
+      <a class="pill" href="https://www.camps.ca/swimming-camps.php" target="_blank">🏊 Swimming</a>
+      <a class="pill" href="https://www.camps.ca/music-lessons.php" target="_blank">🎸 Music</a>
+      <a class="pill" href="https://www.camps.ca/horseback-riding-lessons.php" target="_blank">🐴 Equestrian</a>
+      <a class="pill" href="https://www.camps.ca/robotics-camp-kids.php" target="_blank">🤖 Robotics</a>
     </div>
   </div>
 </div>
