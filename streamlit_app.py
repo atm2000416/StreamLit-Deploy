@@ -593,55 +593,149 @@ def clean_activities(activities_str):
             result.append(a)
     return ', '.join(result)
 
-def format_camp_context(camps):
-    """Format camp data as readable context for Gemini — deduplicated by cid"""
-    # Deduplicate: keep one row per camp (best region match = first occurrence)
-    seen_cids = set()
-    deduped = []
+def dedupe_camps(camps):
+    """Deduplicate camps by cid, keeping first (best-tier) occurrence."""
+    seen, deduped = set(), []
     for c in camps:
         cid = c.get('cid')
-        if cid not in seen_cids:
-            seen_cids.add(cid)
+        if cid not in seen:
+            seen.add(cid)
             deduped.append(c)
+    return deduped
+
+
+def build_camp_url(c):
+    """Return session-level URL when exactly 1 session matched, else camp URL."""
+    session_count = int(c.get('session_count') or 0)
+    session_url   = c.get('session_url') or ''
+    camp_url      = c.get('camp_url') or ''
+    return session_url if (session_count == 1 and session_url) else (camp_url or session_url)
+
+
+def generate_blurbs(deduped, user_text, api_key):
+    """Single Gemini call: given N camps, return N one-sentence Why-it-fits blurbs."""
+    camp_snippets = []
+    for i, c in enumerate(deduped, 1):
+        name     = c.get('camp_name', '')
+        programs = (c.get('matching_programs') or '').strip()
+        desc     = (c.get('description') or '')[:120]
+        camp_snippets.append(
+            f"CAMP {i}: {name}\n"
+            f"Programs: {programs[:300] if programs else 'N/A'}\n"
+            f"Description: {desc}"
+        )
+
+    system = (
+        "You are a warm, knowledgeable Canadian camp consultant. "
+        "For each numbered camp below, write exactly ONE sentence (max 25 words) explaining "
+        "why it fits the user's search. Draw from Programs text first, then Description. "
+        "Be specific — mention the actual program name or a standout detail. "
+        "No corporate language. Sound like a trusted friend.\n\n"
+        "Reply with ONLY this format — one line per camp, nothing else:\n"
+        "1: <blurb>\n2: <blurb>\n..."
+    )
+    user_prompt = f"User searched for: {user_text}\n\n" + "\n\n".join(camp_snippets)
+
+    raw = call_gemini(system, user_prompt, api_key, max_tokens=1500)
+
+    # Parse "1: blurb" lines into a dict
+    blurbs = {}
+    if raw:
+        import re
+        for m in re.finditer(r'^(\d+):\s*(.+)$', raw, re.MULTILINE):
+            blurbs[int(m.group(1))] = m.group(2).strip()
+    return blurbs
+
+
+def format_camp_context(camps):
+    """Legacy — kept for dietary/fallback paths that still pass context to Gemini."""
+    deduped = dedupe_camps(camps)
     lines = []
     for c in deduped:
-        name          = c.get('camp_name', '') or ''
-        session_count = int(c.get('session_count') or 0)
-        session_url   = c.get('session_url') or ''
-        camp_url      = c.get('camp_url') or ''
-        # Link directly to the specific session when only 1 matched
-        url           = session_url if (session_count == 1 and session_url) else (camp_url or session_url)
-        province  = c.get('province', '')
+        name      = c.get('camp_name', '') or ''
+        url       = build_camp_url(c)
         region    = c.get('region', '')
-        style     = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
-        tier      = c.get('listing_tier', '')
+        province  = c.get('province', '')
         age_min   = c.get('age_min', '')
         age_max   = c.get('age_max', '')
         cost_min  = c.get('cost_min', '')
         cost_max  = c.get('cost_max', '')
-        activities= clean_activities(c.get('activities', ''))
-        desc      = (c.get('description') or '')[:150]
-
-        age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else "Ages vary"
-        cost_str = f"${cost_min:,}-${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
-
-        # matching_programs: pipe-separated "sessionID:class_name (ages X-Y)"
-        matching_programs = (c.get('matching_programs') or '').strip()
-
+        style     = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
+        matching  = (c.get('matching_programs') or '').strip()
+        desc      = (c.get('description') or '')[:120]
+        age_str   = f"Ages {age_min}-{age_max}" if age_min and age_max else "Ages vary"
+        cost_str  = f"${cost_min:,}-${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
         lines.append(
-            f"CAMP: {name}\n"
-            f"MARKDOWN_LINK: [{name}]({url})\n"
-            f"SESSION_URL: {session_url}\n"
-            f"SESSION_COUNT: {session_count}\n"
-            f"MATCHING_PROGRAMS: {matching_programs}\n"
-            f"Location: {region}, {province}\n"
-            f"Type: {style} | Tier: {tier}\n"
-            f"Activities: {activities}\n"
-            f"{age_str} | {cost_str}\n"
-            f"Description: {desc}\n"
+            f"CAMP: {name} | {region}, {province} | {style} | {age_str} | {cost_str}\n"
+            f"URL: {url}\nPrograms: {matching[:200]}\nDescription: {desc}"
         )
-    header = f"TOTAL_CAMPS_IN_DATABASE: {len(deduped)}\n===\n"
-    return header + "\n---\n".join(lines)
+    return "\n---\n".join(lines)
+
+
+def render_results(deduped, blurbs, user_text, filters, fallback, province, region):
+    """Python renders the guaranteed-complete camp list — no Gemini dropping camps."""
+    if not deduped:
+        return None   # caller handles empty case
+
+    # Opening line
+    style_label  = filters.get('style', '')
+    gender_label = filters.get('gender', '')
+    age_val      = filters.get('age')
+    act_label    = filters.get('activity', '')
+
+    descriptors = []
+    if gender_label == 'girls': descriptors.append('all-girls')
+    elif gender_label == 'boys': descriptors.append('all-boys')
+    if style_label:   descriptors.append(style_label)
+    if act_label:     descriptors.append(act_label)
+    descriptors.append('camps')
+    camp_type_str = ' '.join(descriptors)
+
+    loc_str = region or province or 'Canada'
+    age_str = f' for age {age_val}' if age_val else ''
+    intro   = f"Here are {len(deduped)} {camp_type_str} in {loc_str}{age_str}:\n\n"
+
+    if fallback and fallback != 'exact':
+        fallback_notes = {
+            'no_activity_in_region':   f"*No {act_label} camps found near {region} — showing other camps in the area.*\n\n",
+            'no_activity_in_province': f"*No {act_label} camps found in {province} — showing other camps in the province.*\n\n",
+            'province_only':           f"*No exact match — showing camps in {province}.*\n\n",
+            'no_match':                "*No exact matches — showing top available camps.*\n\n",
+        }
+        intro += fallback_notes.get(fallback, '')
+
+    # Build each camp block — Python guarantees all N appear
+    blocks = []
+    for i, c in enumerate(deduped, 1):
+        name      = c.get('camp_name', '') or ''
+        url       = build_camp_url(c)
+        region_c  = c.get('region', '')
+        province_c= c.get('province', '')
+        age_min   = c.get('age_min', '')
+        age_max   = c.get('age_max', '')
+        cost_min  = c.get('cost_min', '')
+        cost_max  = c.get('cost_max', '')
+        camp_style= 'Overnight Camp' if c.get('camp_style') == 'overnight' else 'Day Camp'
+
+        age_display  = f"Ages {age_min}–{age_max}" if age_min and age_max else "Ages vary"
+        cost_display = f"${cost_min:,}–${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
+
+        blurb = blurbs.get(i, '')
+        why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
+
+        block = (
+            f"* **[{name}]({url})**\n"
+            f"   * **Location:** {region_c}, {province_c}\n"
+        )
+        if why_line:
+            block += why_line + "\n"
+        block += (
+            f"   * **Ages:** {age_display} | **Cost:** {cost_display}\n"
+            f"   * **Type:** {camp_style}"
+        )
+        blocks.append(block)
+
+    return intro + "\n".join(blocks)
 
 
 def process_query(user_text, config, client_camps, chat_history=None, last_filters=None):
@@ -881,107 +975,36 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         )
         return response, elapsed, filters
 
-    if not camps:
-        camp_context = "No camps found in the database matching these criteria."
+    # Step 4: Deduplicate, generate blurbs, render — Python controls the list
+    deduped = dedupe_camps(camps) if camps else []
+
+    if not deduped:
+        elapsed = time.time() - start
+        return "I couldn't find any camps matching those criteria in our verified member network. Try broadening your search — remove a filter or ask me to widen the location.", elapsed, filters
+
+    # New-child acknowledgement prefix
+    new_child_prefix = ""
+    if is_new_child:
+        new_child_prefix = "Switching gears for your other child! " if filters.get('gender') not in ('girls','boys') else (
+            "Switching gears for your son! " if filters.get('gender') == 'boys' else "Switching gears for your daughter! "
+        )
+
+    # Step 5: Single Gemini call — blurbs only (one sentence per camp)
+    blurbs = generate_blurbs(deduped, user_text, config["GEMINI_API_KEY"])
+
+    # Step 6: Python renders guaranteed-complete list
+    rendered = render_results(deduped, blurbs, user_text, filters, fallback, province, region)
+
+    # Closing question — one Gemini sentence or hardcoded fallback
+    closing_system = "You are a camp consultant. Write ONE short friendly question (max 12 words, ending with ?) to help the user narrow down their camp search. No preamble."
+    closing_q = call_gemini(closing_system, f"User searched: {user_text}. Filters: {filters}", config["GEMINI_API_KEY"], max_tokens=40)
+    if not closing_q or '?' not in closing_q:
+        closing_q = "Want me to filter by age range, cost, or specific activities?"
+
+    if new_child_prefix:
+        response = new_child_prefix + "\n\n" + rendered + "\n\n" + closing_q.strip()
     else:
-        camp_context = format_camp_context(camps)
-
-    # Step 5: Build fallback note for Gemini
-    fallback_note = ""
-    activity_label = filters.get('activity','') or ''
-    if fallback == 'no_activity_in_region':
-        fallback_note = (f"IMPORTANT: No camps specifically offering '{activity_label}' were found near {region}. "
-                        f"The camps shown are in {region} but do NOT specifically offer '{activity_label}'. "
-                        f"Tell the user honestly there are no '{activity_label}' camps in this area "
-                        f"and suggest they contact these local camps to ask about accommodations, "
-                        f"or suggest broadening their search.")
-    elif fallback == 'no_activity_in_province':
-        fallback_note = (f"IMPORTANT: No camps specifically offering '{activity_label}' were found in {province}. "
-                        f"The camps shown are in {province} but do NOT offer '{activity_label}'. "
-                        f"Be honest about this — do not suggest unrelated camps 'might' offer it. "
-                        f"Suggest the user contact camps directly or broaden their search.")
-    elif fallback == 'province_only':
-        fallback_note = (f"IMPORTANT: No '{activity_label}' camps found in {province}. "
-                        f"Showing other camps in {province}. Be honest about the mismatch.")
-    elif fallback == 'no_match':
-        fallback_note = "Note: No exact matches found, showing top available member camps."
-
-    # Step 6: Gemini writes the full consultant response
-    user_name  = filters.get('name', '')
-    greeting   = f"The user's name is {user_name}. Address them by name." if user_name else ""
-    new_child_note = (
-        "IMPORTANT: The user has switched to searching for a DIFFERENT child. "
-        "Naturally acknowledge this at the start of your response — e.g. 'Switching gears for your younger one!' or 'Got it, a new search for your son!' — keep it brief and warm, then go straight into results."
-    ) if is_new_child else ""
-
-    system_prompt = f"""You are a trusted Canadian camp consultant at camps.ca and ourkids.net — the kind who has personally visited these camps and knows what makes each one special.
-You speak to parents like a knowledgeable friend: warm, direct, and confident. No filler phrases, no corporate tone.
-Every recommendation feels personal and specific — never generic.
-{greeting}
-{new_child_note}
-STRICT RULES:
-1. Only recommend camps from the provided database list — never invent or assume details
-2. Use ONLY the description text provided for each camp — do not add information from your training
-3. Always format camp names as clickable markdown links: [Camp Name](url)
-4. If the user's query is ambiguous (e.g. "vegetarian camps" could mean a camp type OR dietary need),
-   and no camps were found, ask a clarifying follow-up question rather than assuming one interpretation.
-5. Never show gender-filtered results as co-ed. If gender=girls, all results are girls-only camps.
-4. If fallback note says camps don't match request, say so honestly — never force relevance
-5. All camps are verified members of camps.ca network
-6. Never say a camp "might" offer something unless it's in the provided description"""
-
-    user_prompt = f"""User request: {user_text}
-
-Extracted search criteria: {filters}
-
-{fallback_note}
-
-Available camps from our verified member database:
-{camp_context}
-
-Please provide a personalized consultant response.
-CRITICAL RULES:
-- Only recommend camps that genuinely match what the user asked for
-- If the fallback note says camps do NOT match the request, say so honestly
-- Never suggest an unrelated camp "might" offer something it clearly doesn't
-- For ambiguous searches (vegetarian, vegan, kosher etc): ask a clarifying question — don't assume it means dietary need vs. camp type
-- Include for each RELEVANT camp:
-- Format EVERY camp exactly like this — no exceptions:
-  * **[Camp Name](url)**
-     * Location: Region, Province
-     * Why it fits: [1-2 sentences max — warm, specific, written like a trusted friend recommending this program. Draw from the program description in MATCHING_PROGRAMS (after the ' -- '). Lead with what makes this program stand out for the child, not a dry list of features. If no description available, use the camp's Description field.]
-     * Ages: X-Y | Cost: $min-$max/week
-     * Type: Day Camp or Overnight Camp
-- URL RULES — use in this priority order:
-  1. If SESSION_COUNT = 1: use SESSION_URL as the link (links directly to the specific program)
-  2. If SESSION_COUNT > 1: use MARKDOWN_LINK (links to the camp's main page)
-- MATCHING_PROGRAMS format is: "sessionID:program name (ages X-Y) -- program description"
-  The ' -- ' separator divides the program label from its description text
-- Use the description text (after ' -- ') as your source for Why it fits — rewrite it in your own warm voice, don't copy it verbatim
-- If multiple programs match, pick the strongest description and mention the count naturally: "3 cheerleading programs including..."
-- Keep Why it fits to 1-2 punchy sentences. No corporate language. Sound like you've seen these programs firsthand.
-- If a camp's MATCHING_PROGRAMS is empty or null, still show the camp — use the camp Description field for Why it fits instead. Never silently drop a camp that the database returned.
-- The context begins with TOTAL_CAMPS_IN_DATABASE: N — you MUST show all N camps. Count your output. If you have fewer than N camps listed, you have silently dropped one — go back and add it.
-- Gold-tier camps appear first in the context — list them first. Then silver, then bronze.
-- NEVER omit a camp because it seems less relevant. Every camp in the context matched the user's search criteria in the database.
-- After the full list, end with ONE short question to help narrow down further — e.g. "Want me to filter by age or location?" This question MUST end with a single '?' and nothing after it.
-- CRITICAL: Never ask multiple questions. One question maximum, at the very end."""
-
-    response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=6000)
-
-    if not response:
-        # Fallback to simple formatted list if Gemini fails
-        lines = []
-        for c in camps[:5]:
-            url  = c.get('camp_url','')
-            name = c.get('camp_name','')
-            region_str = f"{c.get('region','')}, {c.get('province','')}"
-            style = 'Day Camp' if c.get('camp_style') == 'day' else 'Overnight Camp'
-            tier  = c.get('listing_tier','')
-            acts  = c.get('activities','')
-            cost  = f"${c.get('cost_min','')}–${c.get('cost_max','')}/wk" if c.get('cost_min') else ""
-            lines.append(f"- **[{name}]({url})** — {style}, {region_str} [{tier}] | {acts} | {cost}")
-        response = f"Here are matching camps:\n" + "\n".join(lines)
+        response = rendered + "\n\n" + closing_q.strip()
 
     elapsed = time.time() - start
     return response, elapsed, filters
