@@ -677,19 +677,19 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
     if not deduped:
         return None   # caller handles empty case
 
-    # Opening line
-    style_label  = filters.get('style', '')
-    gender_label = filters.get('gender', '')
+    # Opening line — only label filters that were explicitly in THIS search
+    style_label  = filters.get('style') or ''
+    gender_label = filters.get('gender') or ''
     age_val      = filters.get('age')
-    act_label    = filters.get('activity', '')
+    act_label    = filters.get('activity') or ''
 
     descriptors = []
     if gender_label == 'girls': descriptors.append('all-girls')
     elif gender_label == 'boys': descriptors.append('all-boys')
-    if style_label:   descriptors.append(style_label)
-    if act_label:     descriptors.append(act_label)
+    if style_label:  descriptors.append(style_label)
+    if act_label:    descriptors.append(act_label)
     descriptors.append('camps')
-    camp_type_str = ' '.join(descriptors)
+    camp_type_str = ' '.join(d for d in descriptors if d)
 
     loc_str = region or province or 'Canada'
     age_str = f' for age {age_val}' if age_val else ''
@@ -839,6 +839,16 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         if any(p in text_lower_check for p in explicit_new):
             new_search_signals.append('explicit_new')
 
+        # New activity signal — if the new message mentions a different activity
+        # than the previous search, treat as a fresh search (not a refinement)
+        prev_activity = (last_filters.get('activity') or '').lower().strip()
+        new_filters_peek = extract_filters(user_text, config['GEMINI_API_KEY'])
+        new_activity = (new_filters_peek.get('activity') or '').lower().strip()
+        if new_activity and prev_activity and new_activity != prev_activity:
+            new_search_signals.append('activity_change')
+            # Pre-set filters to the freshly extracted ones — no merge needed
+            _fresh_filters = new_filters_peek
+
     # ── Layer 2: Gemini conflict check (only when signals are ambiguous) ────
     # Fires when we have SOME signals but not a clear-cut case
     search_intent = 'SAME'  # default
@@ -895,9 +905,10 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
         combined = user_text
 
-    elif is_new_child or not last_filters:
-        # New child / fresh search — extract clean filters, no inheritance
-        filters = extract_filters(user_text, config['GEMINI_API_KEY'])
+    elif is_new_child or not last_filters or 'activity_change' in new_search_signals:
+        # New child / new activity / fresh search — extract clean filters, no inheritance
+        # Use pre-computed filters if activity_change already extracted them
+        filters = _fresh_filters if 'activity_change' in new_search_signals and '_fresh_filters' in locals() else extract_filters(user_text, config['GEMINI_API_KEY'])
         combined = user_text
 
     elif ai_asked_question or is_pure_refinement or is_location_reply or is_correction:
@@ -977,13 +988,35 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     # Step 4: Deduplicate then enforce gold-first cap — gold always included
     raw_deduped = dedupe_camps(camps) if camps else []
+
+    # BUG 2 FIX: If fallback kicked in AND user searched a specific activity,
+    # the returned camps don't match — don't show them, return honest no-results
+    activity_searched = (filters.get('activity') or '').strip()
+    is_activity_fallback = (
+        activity_searched and
+        fallback in ('no_activity_in_region', 'no_activity_in_province', 'province_only', 'no_match')
+    )
+
+    if not raw_deduped or is_activity_fallback:
+        elapsed = time.time() - start
+        from urllib.parse import quote_plus as _qp
+        loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+        if activity_searched and is_activity_fallback:
+            search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp(activity_searched + ' camps')}"
+            return (
+                f"I couldn't find **{activity_searched} camps** in {loc_hint} in our verified member network.\n\n"
+                f"Try a broader location, or search our full directory:\n"
+                f"🔍 [Search camps.ca for {activity_searched} camps]({search_url})\n\n"
+                f"💬 *Want me to search all of Ontario, or try a different activity?*"
+            ), elapsed, filters
+        return (
+            "I couldn't find any camps matching those criteria in our verified member network. "
+            "Try broadening your search — remove a filter or ask me to widen the location."
+        ), elapsed, filters
+
     gold  = [c for c in raw_deduped if c.get('listing_tier') == 'gold']
     other = [c for c in raw_deduped if c.get('listing_tier') != 'gold']
     deduped = gold + other[:max(0, 8 - len(gold))]  # all gold + up to 8 total
-
-    if not deduped:
-        elapsed = time.time() - start
-        return "I couldn't find any camps matching those criteria in our verified member network. Try broadening your search — remove a filter or ask me to widen the location.", elapsed, filters
 
     # New-child acknowledgement prefix
     new_child_prefix = ""
