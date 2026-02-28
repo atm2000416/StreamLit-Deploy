@@ -250,7 +250,7 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         return {}
 
 
-def search_camps(filters, config, limit=100):
+def search_camps(filters, config, limit=100, named_camp=None):
     """Query sessions_clean joined to camps_clean for session-level precision"""
     from sqlalchemy import create_engine, text
 
@@ -426,7 +426,16 @@ def search_camps(filters, config, limit=100):
     elif gender == 'boys':
         conditions.append("sc.gender = 3")
 
+    # If a specific camp was named in a correction, force-include it as an OR
+    named_camp_condition = ""
+    if named_camp:
+        params['named_camp'] = f"%{named_camp}%"
+        named_camp_condition = f" OR sc.camp_name LIKE :named_camp"
+
     where = " AND ".join(conditions)
+    # Wrap entire WHERE in parens then OR with named_camp so it always appears
+    if named_camp_condition:
+        where = f"({where}){named_camp_condition}"
     sql = f"""SELECT
             sc.cid, sc.camp_name, sc.province,
             MIN(sc.region)                  AS region,
@@ -441,11 +450,15 @@ def search_camps(filters, config, limit=100):
                 ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
             GROUP_CONCAT(
                 DISTINCT CONCAT(
-                    sc.session_id, ':', sc.class_name,
+                    '#', sc.session_id, ': ', sc.class_name,
                     ' (ages ', sc.age_from, '-', sc.age_to, ')',
-                    IF(COALESCE(NULLIF(TRIM(s.mini_description),''), NULLIF(TRIM(s.description),'')) IS NOT NULL,
-                       CONCAT(' -- ', LEFT(COALESCE(NULLIF(TRIM(s.mini_description),''), TRIM(s.description)), 200)),
-                       '')
+                    COALESCE(
+                        IF(NULLIF(TRIM(s.mini_description),'') IS NOT NULL,
+                           CONCAT(' — ', LEFT(TRIM(s.mini_description), 200)), NULL),
+                        IF(NULLIF(TRIM(s.description),'') IS NOT NULL,
+                           CONCAT(' — ', LEFT(TRIM(s.description), 200)), NULL),
+                        ''
+                    )
                 )
                 ORDER BY sc.listing_tier SEPARATOR ' ||| '
             )                               AS matching_programs,
@@ -647,7 +660,10 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             if m['role'] == 'assistant':
                 last_assistant_msg = m['content'].strip()
                 break
-    ai_asked_question = last_assistant_msg.rstrip().endswith('?')
+    # Check if AI's last message contained a question — look at last non-empty line
+    last_lines = [l.strip() for l in last_assistant_msg.splitlines() if l.strip()]
+    last_meaningful_line = last_lines[-1] if last_lines else ''
+    ai_asked_question = last_meaningful_line.endswith('?')
 
     # Pure single-word affirmatives — no new info, reuse filters wholesale
     affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
@@ -670,6 +686,28 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'i am from', "i'm from", 'we are in', "we're in", 'located in',
     ]
     is_location_reply = any(w in text_lower_check for w in location_words)
+
+    # Detect correction/challenge messages — user pointing out a missing result
+    # These should always merge into last_filters, never start fresh
+    correction_patterns = [
+        "isn't ", "is not ", "what about ", "you missed ", "you forgot ",
+        "should be ", "also overnight", "also a ", "that's also", "that is also",
+        "aren't they", "are they not", "isn't that", "isn't it",
+        "how about ", "didn't you", "did you miss",
+    ]
+    is_correction = any(p in text_lower_check for p in correction_patterns)
+
+    # If this is a correction, try to extract any camp name mentioned in the message
+    # e.g. "isn't Teen Ranch overnight too?" → named_camp_override = "Teen Ranch"
+    # We do this by checking if any known camp-like proper nouns appear (title case words)
+    import re as _re2
+    named_camp_override = None
+    if is_correction:
+        # Extract sequences of title-case words as potential camp names
+        title_words = _re2.findall(r'(?:[A-Z][a-z]+(?:[\s]+[A-Z][a-z]+)*)', user_text)
+        if title_words:
+            # Take the longest title-case sequence as the most likely camp name
+            named_camp_override = max(title_words, key=len)
 
     # ── Layer 1: Fast conflict signals ──────────────────────────────────────
     # Detect signals that suggest a NEW child / NEW search
@@ -767,7 +805,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         filters = extract_filters(user_text, config['GEMINI_API_KEY'])
         combined = user_text
 
-    elif ai_asked_question or is_pure_refinement or is_location_reply:
+    elif ai_asked_question or is_pure_refinement or is_location_reply or is_correction:
         # AI asked a follow-up OR user is adding detail to SAME search
         # Merge: new filters override old, but old filters fill any gaps
         new_filters = extract_filters(user_text, config['GEMINI_API_KEY'])
@@ -780,7 +818,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         combined = user_text
 
     # Step 3: Fetch matching camps from camps_clean
-    camps, province, region, fallback = search_camps(filters, config)
+    camps, province, region, fallback = search_camps(filters, config, named_camp=named_camp_override if 'named_camp_override' in locals() else None)
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -921,8 +959,8 @@ CRITICAL RULES:
 - Use the description text (after ' -- ') as your source for Why it fits — rewrite it in your own warm voice, don't copy it verbatim
 - If multiple programs match, pick the strongest description and mention the count naturally: "3 cheerleading programs including..."
 - Keep Why it fits to 1-2 punchy sentences. No corporate language. Sound like you've seen these programs firsthand.
-- EXCLUSION RULE: If a camp's MATCHING_PROGRAMS is empty or null, exclude it from results entirely
-- List ALL camps that have matching programs
+- If a camp's MATCHING_PROGRAMS is empty or null, still show the camp — use the camp Description field for Why it fits instead. Never silently drop a camp that the database returned.
+- List ALL camps provided in the database context — do not silently omit any. If a camp is in the context, it must appear in your response.
 - After the full list, end with ONE short question to help narrow down further — e.g. "Want me to filter by age or location?" This question MUST end with a single '?' and nothing after it.
 - CRITICAL: Never ask multiple questions. One question maximum, at the very end."""
 
