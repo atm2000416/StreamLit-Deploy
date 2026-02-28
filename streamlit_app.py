@@ -635,16 +635,12 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     import time
     start = time.time()
 
-    # Step 1: Determine if this is a refinement or a fresh query
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 1: Classify this message as SAME_CHILD, DIFFERENT_CHILD, or REFINE
+    # ─────────────────────────────────────────────────────────────────────────
     text_lower_check = user_text.lower().strip()
 
-    # Short single-word affirmatives with no new info — just reuse last filters wholesale
-    affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
-    is_affirmative = text_lower_check.rstrip('!.') in affirmatives
-
-    # Detect if the AI's last message was a clarifying question
-    # (ends with '?') AND user is providing a short answer like "yes, i am from alberta"
-    # In this case: extract NEW filters from user reply, then MERGE into last_filters
+    # Get last assistant message (used to detect if AI asked a question)
     last_assistant_msg = ''
     if chat_history:
         for m in reversed(chat_history):
@@ -653,7 +649,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                 break
     ai_asked_question = last_assistant_msg.rstrip().endswith('?')
 
-    # Detect purely additive refinements (no new topic/activity)
+    # Pure single-word affirmatives — no new info, reuse filters wholesale
+    affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
+    is_affirmative = text_lower_check.rstrip('!.') in affirmatives
+
+    # Purely additive refinement phrases
     refinement_only_phrases = [
         'show more', 'more options', 'any others', 'what else',
         'day camps only', 'overnight only', 'just day', 'just overnight',
@@ -662,41 +662,122 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     ]
     is_pure_refinement = any(p in text_lower_check for p in refinement_only_phrases)
 
-    # Detect location words — signal that province/region is being added
+    # Location-only reply signals (province/city being added to existing search)
     location_words = [
         'ontario', 'quebec', 'bc', 'british columbia', 'alberta', 'manitoba',
         'saskatchewan', 'nova scotia', 'new brunswick', 'pei', 'newfoundland',
         'toronto', 'vancouver', 'calgary', 'edmonton', 'ottawa', 'montreal',
-        'i am from', 'i\'m from', 'we are in', 'we\'re in', 'located in', 'near',
+        'i am from', "i'm from", 'we are in', "we're in", 'located in',
     ]
     is_location_reply = any(w in text_lower_check for w in location_words)
 
-    if is_affirmative and last_filters:
+    # ── Layer 1: Fast conflict signals ──────────────────────────────────────
+    # Detect signals that suggest a NEW child / NEW search
+    new_search_signals = []
+
+    if last_filters:
+        prev_gender  = (last_filters.get('gender') or '').lower()
+        prev_age     = last_filters.get('age')
+
+        # Gender flip signals
+        boy_words  = ['son', 'boy', 'his camp', 'for him', 'my boy', 'male', 'brother']
+        girl_words = ['daughter', 'girl', 'her camp', 'for her', 'my girl', 'female', 'sister']
+
+        if prev_gender == 'girls' and any(w in text_lower_check for w in boy_words):
+            new_search_signals.append('gender_flip')
+        if prev_gender == 'boys' and any(w in text_lower_check for w in girl_words):
+            new_search_signals.append('gender_flip')
+
+        # Age conflict signals — extract age from new message
+        import re as _re
+        age_match = _re.search(r'(\d+)[\s-]?year', text_lower_check)
+        new_age = int(age_match.group(1)) if age_match else None
+        if new_age and prev_age:
+            # Flag if ages are far apart (>4 years) suggesting different child
+            if abs(new_age - prev_age) > 4:
+                new_search_signals.append('age_conflict')
+
+        # Explicit new-search phrases
+        explicit_new = [
+            'different camp', 'separate search', 'also looking for', 'my other child',
+            'another child', 'my other kid', 'different child', 'for my son', 'for my daughter',
+            'find me a camp for my', 'looking for a camp for my',
+        ]
+        if any(p in text_lower_check for p in explicit_new):
+            new_search_signals.append('explicit_new')
+
+    # ── Layer 2: Gemini conflict check (only when signals are ambiguous) ────
+    # Fires when we have SOME signals but not a clear-cut case
+    search_intent = 'SAME'  # default
+
+    if last_filters and new_search_signals:
+        # Strong enough signals — classify as DIFFERENT without extra Gemini call
+        if 'gender_flip' in new_search_signals or 'explicit_new' in new_search_signals:
+            search_intent = 'DIFFERENT'
+        elif len(new_search_signals) >= 2:
+            search_intent = 'DIFFERENT'
+        else:
+            # Ambiguous — use a fast Gemini classification call
+            classify_system = (
+                "You are classifying a camp search conversation. "
+                "Reply with exactly one word: SAME, DIFFERENT, or CLARIFY."
+            )
+            classify_prompt = (
+                f"Previous search filters: {last_filters}\n"
+                f"New user message: \"{user_text}\"\n\n"
+                "Is the new message searching for the SAME child (refinement/follow-up), "
+                "a DIFFERENT child (new search), or is it UNCLEAR which child?"
+            )
+            classification = call_gemini(
+                classify_system, classify_prompt,
+                config['GEMINI_API_KEY'], max_tokens=10
+            ).strip().upper()
+            if classification in ('DIFFERENT', 'SAME', 'CLARIFY'):
+                search_intent = classification
+
+    # ── Route based on intent ────────────────────────────────────────────────
+    is_new_child = (search_intent == 'DIFFERENT')
+    needs_clarification = (search_intent == 'CLARIFY')
+
+    if needs_clarification:
+        # Return a clarification question immediately — don't search yet
+        elapsed = time.time() - start
+        prior_summary = []
+        if last_filters.get('gender'):   prior_summary.append(last_filters['gender'] + '-only')
+        if last_filters.get('style'):    prior_summary.append(last_filters['style'])
+        if last_filters.get('age'):      prior_summary.append(f"age {last_filters['age']}")
+        if last_filters.get('activity'): prior_summary.append(last_filters['activity'])
+        prior_str = ', '.join(prior_summary) if prior_summary else 'your previous search'
+        return (
+            f"Just to make sure I find the right fit — is this for the same child "
+            f"({prior_str}), or are you searching for a different child?",
+            elapsed,
+            last_filters
+        )
+
+    # Step 2: Extract / merge filters
+    # ─────────────────────────────────────────────────────────────────────────
+    if is_affirmative and last_filters and not is_new_child:
         # Pure "yes/sure" — reuse filters as-is
         filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
         combined = user_text
 
-    elif last_filters and (ai_asked_question or is_pure_refinement or is_location_reply):
-        # AI asked a follow-up question OR user is adding location/refinement detail
-        # → Extract new filters from user reply, then MERGE into last_filters
-        # last_filters wins for keys the new reply doesn't mention (preserves overnight, girls, etc.)
-        new_filters = extract_filters(user_text, config["GEMINI_API_KEY"])
+    elif is_new_child or not last_filters:
+        # New child / fresh search — extract clean filters, no inheritance
+        filters = extract_filters(user_text, config['GEMINI_API_KEY'])
+        combined = user_text
+
+    elif ai_asked_question or is_pure_refinement or is_location_reply:
+        # AI asked a follow-up OR user is adding detail to SAME search
+        # Merge: new filters override old, but old filters fill any gaps
+        new_filters = extract_filters(user_text, config['GEMINI_API_KEY'])
         filters = {**last_filters, **{k: v for k, v in new_filters.items() if v is not None}}
         combined = user_text
 
-    elif chat_history and is_pure_refinement:
-        recent = [m["content"] for m in chat_history[-2:] if m["role"] == "user"]
-        combined = " ".join(recent + [user_text])
-
     else:
-        # Genuine fresh query — no prior context
+        # Default: fresh extraction, no context
+        filters = extract_filters(user_text, config['GEMINI_API_KEY'])
         combined = user_text
-
-    # Step 2: Extract filters using Gemini (skip if already set above)
-    if 'filters' not in dir():
-        filters = {}
-    if not (is_affirmative and last_filters) and not (last_filters and (ai_asked_question or is_location_reply)):
-        filters = extract_filters(combined, config["GEMINI_API_KEY"])
 
     # Step 3: Fetch matching camps from camps_clean
     camps, province, region, fallback = search_camps(filters, config)
@@ -787,13 +868,18 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         fallback_note = "Note: No exact matches found, showing top available member camps."
 
     # Step 6: Gemini writes the full consultant response
-    user_name = filters.get('name', '')
-    greeting  = f"The user's name is {user_name}. Address them by name." if user_name else ""
+    user_name  = filters.get('name', '')
+    greeting   = f"The user's name is {user_name}. Address them by name." if user_name else ""
+    new_child_note = (
+        "IMPORTANT: The user has switched to searching for a DIFFERENT child. "
+        "Naturally acknowledge this at the start of your response — e.g. 'Switching gears for your younger one!' or 'Got it, a new search for your son!' — keep it brief and warm, then go straight into results."
+    ) if is_new_child else ""
 
     system_prompt = f"""You are a trusted Canadian camp consultant at camps.ca and ourkids.net — the kind who has personally visited these camps and knows what makes each one special.
 You speak to parents like a knowledgeable friend: warm, direct, and confident. No filler phrases, no corporate tone.
 Every recommendation feels personal and specific — never generic.
 {greeting}
+{new_child_note}
 STRICT RULES:
 1. Only recommend camps from the provided database list — never invent or assume details
 2. Use ONLY the description text provided for each camp — do not add information from your training
