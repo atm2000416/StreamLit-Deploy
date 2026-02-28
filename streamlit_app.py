@@ -454,9 +454,9 @@ def search_camps(filters, config, limit=100, named_camp=None):
                     ' (ages ', sc.age_from, '-', sc.age_to, ')',
                     COALESCE(
                         IF(NULLIF(TRIM(s.mini_description),'') IS NOT NULL,
-                           CONCAT(' — ', LEFT(TRIM(s.mini_description), 200)), NULL),
+                           CONCAT(' — ', LEFT(TRIM(s.mini_description), 120)), NULL),
                         IF(NULLIF(TRIM(s.description),'') IS NOT NULL,
-                           CONCAT(' — ', LEFT(TRIM(s.description), 200)), NULL),
+                           CONCAT(' — ', LEFT(TRIM(s.description), 120)), NULL),
                         ''
                     )
                 )
@@ -620,7 +620,7 @@ def format_camp_context(camps):
         cost_min  = c.get('cost_min', '')
         cost_max  = c.get('cost_max', '')
         activities= clean_activities(c.get('activities', ''))
-        desc      = (c.get('description') or '')[:300]
+        desc      = (c.get('description') or '')[:150]
 
         age_str  = f"Ages {age_min}-{age_max}" if age_min and age_max else "Ages vary"
         cost_str = f"${cost_min:,}-${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
@@ -640,7 +640,8 @@ def format_camp_context(camps):
             f"{age_str} | {cost_str}\n"
             f"Description: {desc}\n"
         )
-    return "\n---\n".join(lines)
+    header = f"TOTAL_CAMPS_IN_DATABASE: {len(deduped)}\n===\n"
+    return header + "\n---\n".join(lines)
 
 
 def process_query(user_text, config, client_camps, chat_history=None, last_filters=None):
@@ -960,11 +961,13 @@ CRITICAL RULES:
 - If multiple programs match, pick the strongest description and mention the count naturally: "3 cheerleading programs including..."
 - Keep Why it fits to 1-2 punchy sentences. No corporate language. Sound like you've seen these programs firsthand.
 - If a camp's MATCHING_PROGRAMS is empty or null, still show the camp — use the camp Description field for Why it fits instead. Never silently drop a camp that the database returned.
-- List ALL camps provided in the database context — do not silently omit any. If a camp is in the context, it must appear in your response.
+- The context begins with TOTAL_CAMPS_IN_DATABASE: N — you MUST show all N camps. Count your output. If you have fewer than N camps listed, you have silently dropped one — go back and add it.
+- Gold-tier camps appear first in the context — list them first. Then silver, then bronze.
+- NEVER omit a camp because it seems less relevant. Every camp in the context matched the user's search criteria in the database.
 - After the full list, end with ONE short question to help narrow down further — e.g. "Want me to filter by age or location?" This question MUST end with a single '?' and nothing after it.
 - CRITICAL: Never ask multiple questions. One question maximum, at the very end."""
 
-    response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=4000)
+    response = call_gemini(system_prompt, user_prompt, config["GEMINI_API_KEY"], max_tokens=6000)
 
     if not response:
         # Fallback to simple formatted list if Gemini fails
