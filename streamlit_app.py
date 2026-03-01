@@ -250,6 +250,114 @@ def _validate_filters(filters, user_text):
     return validated
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMANTIC SEARCH ENGINE
+# Replaces the activity_codes keyword lookup with embedding-based similarity.
+# Embeddings are pre-computed and stored in camp_directory.camp_embeddings.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cosine_similarity(a: list, b: list) -> float:
+    """Pure Python cosine similarity — fast enough for <300 camps."""
+    dot  = sum(x * y for x, y in zip(a, b))
+    na   = sum(x * x for x in a) ** 0.5
+    nb   = sum(x * x for x in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def get_query_embedding(query: str, api_key: str) -> list | None:
+    """Embed a search query using Gemini text-embedding-004."""
+    import requests as _req
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "text-embedding-004:embedContent"
+        f"?key={api_key}"
+    )
+    try:
+        resp = _req.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "models/text-embedding-004",
+                "content": {"parts": [{"text": query}]},
+                "taskType": "RETRIEVAL_QUERY",   # query vs document distinction
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()["embedding"]["values"]
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_camp_embeddings(_engine) -> dict:
+    """
+    Load all camp embeddings from DB into memory.
+    Cached for 1 hour — refreshes automatically after new camps are embedded.
+    Returns: {cid: [float, ...], ...}
+    """
+    from sqlalchemy import text as _text
+    try:
+        with _engine.connect() as conn:
+            rows = conn.execute(_text(
+                "SELECT cid, embedding FROM camp_directory.camp_embeddings"
+            )).fetchall()
+        result = {}
+        for cid, emb_json in rows:
+            import json as _json
+            result[int(cid)] = _json.loads(emb_json) if isinstance(emb_json, str) else emb_json
+        return result
+    except Exception:
+        return {}
+
+
+def semantic_score_camps(camps: list, query: str, api_key: str, engine) -> list:
+    """
+    Score each camp by semantic similarity to the query.
+    Adds '_semantic_score' (0.0–1.0) to each camp dict.
+    Falls back to 0.5 for camps with no embedding (graceful degradation).
+    """
+    if not query or not query.strip():
+        for c in camps:
+            c['_semantic_score'] = 0.5
+        return camps
+
+    # Embed the query
+    query_vec = get_query_embedding(query, api_key)
+    if query_vec is None:
+        # Embedding API failed — fall back to neutral scores
+        for c in camps:
+            c['_semantic_score'] = 0.5
+        return camps
+
+    # Load stored embeddings
+    embeddings = load_camp_embeddings(engine)
+
+    for c in camps:
+        cid       = int(c.get('cid') or 0)
+        camp_vec  = embeddings.get(cid)
+        if camp_vec:
+            c['_semantic_score'] = round(cosine_similarity(query_vec, camp_vec), 4)
+        else:
+            c['_semantic_score'] = 0.3   # no embedding → lower than average, not zero
+    return camps
+
+
+def embeddings_are_ready(engine) -> bool:
+    """Check if camp_embeddings table exists and has data."""
+    from sqlalchemy import text as _text
+    try:
+        with engine.connect() as conn:
+            count = conn.execute(_text(
+                "SELECT COUNT(*) FROM camp_directory.camp_embeddings"
+            )).scalar()
+        return (count or 0) > 0
+    except Exception:
+        return False
+
 def extract_filters(user_text, api_key):
     """Use Gemini to extract structured search filters from natural language"""
     system = """You are a camp search assistant. Extract search filters from the user message.
@@ -303,7 +411,7 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         return {}
 
 
-def search_camps(filters, config, limit=20, named_camp=None):
+def search_camps(filters, config, limit=20, named_camp=None, engine=None):
     """Query sessions_clean joined to camps_clean for session-level precision"""
     from sqlalchemy import create_engine, text
 
@@ -356,98 +464,9 @@ def search_camps(filters, config, limit=20, named_camp=None):
         params['city']   = f"%{resolved_region}%"
         params['region'] = f"%{resolved_region}%"
 
-    if activity:
-        # Map common activities to specialty codes for reliable matching
-        activity_codes = {
-            # Sports
-            'hockey':       [29, 188],
-            'skating':      [51],
-            'ice skating':  [51],
-            'sports':       [188, 12, 54, 66, 63, 29],
-            'soccer':       [54],
-            'basketball':   [11, 12],
-            'tennis':       [66],
-            'golf':         [26],
-            'volleyball':   [63],
-            'swimming':     [56],
-            'swim':         [56],
-            'sailing':      [49],
-            'canoe':        [41],
-            'canoeing':     [41],
-            'lacrosse':     [188],
-            'baseball':     [188],
-            # STEM
-            'stem':         [268, 18, 67, 160, 180, 50, 159, 266, 332],
-            'science':      [268, 50, 18],
-            'technology':   [268, 18, 180],
-            'coding':       [18, 68, 159, 180, 266, 268, 332],
-            'programming':  [18, 68, 159, 180, 266, 332],
-            'robotics':     [67, 268, 160],
-            'engineering':  [160, 268, 50],
-            'math':         [20, 129],
-            'ai':           [159, 302, 268],
-            'game design':  [68],
-            # Arts
-            'arts':         [9, 10, 69, 173, 178, 355],
-            'art':          [9, 10, 69, 173, 355],
-            'music':        [37],
-            'dance':        [22],
-            'theatre':      [59, 172],
-            'drama':        [59, 172],
-            'animation':    [178],
-            'photography':  [69],
-            'cooking':      [133],
-            'chef':         [133],
-            # Outdoor / Traditional
-            'outdoor':      [24, 41, 49, 58, 181, 265],
-            'adventure':    [41, 181],
-            'traditional':  [24, 58, 181, 265],
-            'nature':       [24, 181],
-            'canoe':        [41],
-            # Academic
-            'academic':     [20, 32, 97, 196, 314],
-            'french':       [314],
-            'language':     [314],
-            'tutoring':     [32, 97, 314],
-            'debate':       [302],
-            'writing':      [362],
-            'chess':        [278],
-            # Other
-            'equestrian':   [30],
-            'riding':       [30],
-            'horse':        [30],
-            'leadership':   [33, 79, 88],
-            'special needs':[252],
-            'wellness':     [91],
-            # Cheer & Fashion
-            'cheer':        [164],
-            'cheerleading': [164],
-            'cheering':     [164],
-            'fashion':      [71, 172, 264],
-            'fashion design':[71, 264],
-            'beauty':       [172],
-        }
-        act_lower = activity.lower().strip()
-        codes     = activity_codes.get(act_lower, [])
-
-        # Generic umbrella codes that should NOT qualify a session for a specific
-        # activity search — e.g. 188=Sports should NOT match "hockey",
-        # 268=STEM should NOT match "coding", 9/10=Arts should NOT match "dance"
-        generic_codes = {188, 268, 9, 10, 79, 33}
-
-        if codes:
-            # Primary = specific codes only (strips umbrella generics)
-            primary = [c for c in codes if c not in generic_codes]
-            use     = primary if primary else codes   # if ALL codes are generic, use all
-            code_list = ",".join(str(c) for c in use)
-            conditions.append(f"(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))")
-        else:
-            # Unknown activity — text search on class_name
-            conditions.append(
-                "(sc.specialty_label LIKE :act OR sc.class_name LIKE :act2)"
-            )
-            params['act']  = f"%{act_lower}%"
-            params['act2'] = f"%{act_lower}%"
+    # Activity filter removed from SQL — handled by semantic search after SQL
+    # SQL only applies hard structural constraints (province, city, age, style, gender)
+    # This means ALL structurally valid camps are returned, then ranked by embedding similarity
 
     if age:
         conditions.append("sc.age_from <= :age AND sc.age_to >= :age")
@@ -524,55 +543,10 @@ def search_camps(filters, config, limit=20, named_camp=None):
             if rows:
                 return [dict(zip(cols, row)) for row in rows], province, resolved_region, None
 
-            # Fallback 1: drop activity, keep region + province
-            if resolved_region and province and activity:
-                params_no_act = {k:v for k,v in params.items() if k not in ('act','act2')}
-                conds_no_act  = [c for c in conditions if 'specialty' not in c and 'class_name' not in c]
-                sql_f1 = f"""SELECT sc.cid, sc.camp_name, sc.province,
-                        MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
-                        MIN(sc.session_url) AS session_url,
-                        MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
-                        MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
-                        COUNT(DISTINCT sc.session_id) AS session_count,
-                        GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
-                        GROUP_CONCAT(DISTINCT CONCAT(sc.session_id,':', sc.class_name,' (ages ',sc.age_from,'-',sc.age_to,')') ORDER BY sc.listing_tier SEPARATOR ' | ') AS matching_programs,
-                        cc.description
-                    FROM camp_directory.sessions_clean sc
-                    JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
-                    WHERE {' AND '.join(conds_no_act)}
-                    GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
-                             sc.listing_tier, sc.camp_url, cc.description
-                    ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
-                    LIMIT {limit}"""
-                r1 = conn.execute(text(sql_f1), params_no_act)
-                rows1 = r1.fetchall()
-                if rows1:
-                    return [dict(zip(list(r1.keys()), row)) for row in rows1], province, resolved_region, 'no_activity_in_region'
-
-            # Fallback 2: drop region, keep province + activity
-            if resolved_region and province:
-                params_no_reg = {k:v for k,v in params.items() if k != 'region'}
-                conds_no_reg  = [c for c in conditions if 'region' not in c]
-                sql_f2 = f"""SELECT sc.cid, sc.camp_name, sc.province,
-                        MIN(sc.region) AS region, sc.camp_style, sc.listing_tier, sc.camp_url,
-                        MIN(sc.session_url) AS session_url,
-                        MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max,
-                        MIN(NULLIF(sc.cost_from,0)) AS cost_min, MAX(NULLIF(sc.cost_to,0)) AS cost_max,
-                        COUNT(DISTINCT sc.session_id) AS session_count,
-                        GROUP_CONCAT(DISTINCT sc.specialty_label ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
-                        GROUP_CONCAT(DISTINCT CONCAT(sc.session_id,':', sc.class_name,' (ages ',sc.age_from,'-',sc.age_to,')') ORDER BY sc.listing_tier SEPARATOR ' | ') AS matching_programs,
-                        cc.description
-                    FROM camp_directory.sessions_clean sc
-                    JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province
-                    WHERE {' AND '.join(conds_no_reg)}
-                    GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
-                             sc.listing_tier, sc.camp_url, cc.description
-                    ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze')
-                    LIMIT {limit}"""
-                r2 = conn.execute(text(sql_f2), params_no_reg)
-                rows2 = r2.fetchall()
-                if rows2:
-                    return [dict(zip(list(r2.keys()), row)) for row in rows2], province, resolved_region, 'no_activity_in_province'
+            # Fallbacks 1 & 2 removed — activity is no longer a SQL filter.
+            # Semantic search handles activity ranking after SQL returns candidates.
+            # If structural filters (province/city/age/style/gender) yield no results,
+            # proceed to province-only and global fallbacks below.
 
             # Fallback 3: province only — drop both activity and region
             if province:
@@ -647,142 +621,100 @@ def dedupe_camps(camps):
 
 def score_and_rank(camps, filters, fallback):
     """
-    Score each camp by relevancy to the search filters, then sort:
-      primary   → relevancy score DESC (continuous, 0.0–1.0)
-      secondary → tier rank ASC (gold=1, silver=2, bronze=3)
+    Hybrid relevancy scorer combining:
+      1. Semantic similarity (_semantic_score set by semantic_score_camps())
+      2. Structural signals: location, age, style, gender
 
-    Scoring weights (total possible = 1.0):
-      Activity match  : 0.35  (most critical — wrong activity = useless result)
-      Location match  : 0.25  (region exact > province > any)
-      Age match       : 0.20  (session age range covers searched age)
-      Style match     : 0.10  (day vs overnight)
-      Gender match    : 0.10  (when gender was explicitly searched)
+    Weights (rescaled to active filters only):
+      Semantic (activity/topic) : 0.50
+      Location                  : 0.20
+      Age                       : 0.15
+      Style (day/overnight)     : 0.08
+      Gender                    : 0.07
 
-    When a filter wasn't searched, that weight is redistributed proportionally
-    so scores remain comparable across queries with different filter counts.
-
-    Optional signals (no specific activity searched):
-      - Tighter age range = higher score (more precise fit)
-      - Region match > province match
+    Sort: combined_score DESC, then tier ASC (gold > silver > bronze)
     """
-    import re
-
     TIER_RANK = {'gold': 1, 'silver': 2, 'bronze': 3}
 
-    # Weights
-    W = {'activity': 0.35, 'location': 0.25, 'age': 0.20, 'style': 0.10, 'gender': 0.10}
-
-    # Which filters were actually searched
-    searched_activity = (filters.get('activity') or '').lower().strip()
     searched_age      = filters.get('age')
     searched_style    = (filters.get('style') or '').lower().strip()
     searched_gender   = (filters.get('gender') or '').lower().strip()
     searched_region   = (filters.get('region') or '').lower().strip()
     searched_province = (filters.get('province') or '').lower().strip()
+    searched_activity = (filters.get('activity') or '').lower().strip()
 
-    # Determine active weights — filters not searched get weight=0,
-    # remaining weights are rescaled to sum to 1.0
-    active = {}
-    if searched_activity: active['activity'] = W['activity']
-    if searched_age:      active['age']      = W['age']
-    if searched_style:    active['style']    = W['style']
-    if searched_gender:   active['gender']   = W['gender']
-    if searched_region or searched_province:
-                          active['location'] = W['location']
+    W = {}
+    if searched_activity:                     W['semantic']  = 0.50
+    if searched_region or searched_province:  W['location']  = 0.20
+    if searched_age:                          W['age']       = 0.15
+    if searched_style:                        W['style']     = 0.08
+    if searched_gender:                       W['gender']    = 0.07
 
-    total_w = sum(active.values()) or 1.0
-    norm    = {k: v / total_w for k, v in active.items()}
+    total_w = sum(W.values()) or 1.0
+    norm    = {k: v / total_w for k, v in W.items()}
 
     def score_camp(c):
         s = 0.0
 
-        # ── Activity ────────────────────────────────────────────────────────
-        if 'activity' in norm:
-            activities = (c.get('activities') or '').lower()
-            programs   = (c.get('matching_programs') or '').lower()
-            act_words  = set(re.findall(r'\w+', searched_activity))
-            # Full match in activities label or matching_programs
-            if any(w in activities or w in programs for w in act_words if len(w) > 3):
-                s += norm['activity']
-            else:
-                s += 0  # no partial credit — wrong activity is wrong
+        # Semantic — cosine similarity from embedding comparison
+        if 'semantic' in norm:
+            s += norm['semantic'] * c.get('_semantic_score', 0.5)
 
-        # ── Location ────────────────────────────────────────────────────────
+        # Location — city (ground truth) > region > province
         if 'location' in norm:
-            camp_city     = (c.get('city') or '').lower()       # ground truth
+            camp_city     = (c.get('city') or '').lower()
             camp_region   = (c.get('region') or '').lower()
             camp_province = (c.get('province') or '').lower()
             if searched_region and searched_region in camp_city:
-                s += norm['location']           # exact city match (best)
+                s += norm['location']
             elif searched_region and searched_region in camp_region:
-                s += norm['location'] * 0.85    # region match
+                s += norm['location'] * 0.85
             elif searched_province and searched_province in camp_province:
-                s += norm['location'] * 0.6     # province match only
+                s += norm['location'] * 0.60
             elif fallback in ('province_only', 'no_match'):
-                s += norm['location'] * 0.2     # fallback — penalise but don't zero
+                s += norm['location'] * 0.20
 
-        # ── Age ─────────────────────────────────────────────────────────────
+        # Age — within range, with tightness bonus
         if 'age' in norm:
             age_min = c.get('age_min')
             age_max = c.get('age_max')
             if age_min is not None and age_max is not None:
                 if age_min <= searched_age <= age_max:
-                    # Bonus for tighter age range (more targeted program)
-                    range_size = max(age_max - age_min, 1)
-                    tightness  = max(0.0, 1.0 - (range_size - 1) / 18)
+                    tightness = max(0.0, 1.0 - (max(age_max - age_min, 1) - 1) / 18)
                     s += norm['age'] * (0.7 + 0.3 * tightness)
-                else:
-                    s += 0  # age out of range
 
-        # ── Style ───────────────────────────────────────────────────────────
+        # Style
         if 'style' in norm:
-            camp_style = (c.get('camp_style') or '').lower()
-            if searched_style == camp_style:
+            if searched_style == (c.get('camp_style') or '').lower():
                 s += norm['style']
 
-        # ── Gender ──────────────────────────────────────────────────────────
+        # Gender
         if 'gender' in norm:
-            camp_gender = c.get('gender')  # raw int: 2=girls, 3=boys, 1=coed
-            if searched_gender == 'girls' and camp_gender == 2:
+            cg = c.get('gender')
+            if searched_gender == 'girls' and cg == 2:
                 s += norm['gender']
-            elif searched_gender == 'boys' and camp_gender == 3:
+            elif searched_gender == 'boys' and cg == 3:
                 s += norm['gender']
 
-        # ── Optional signals (no specific filter searched) ──────────────────
-        # When no activity searched, reward location precision
-        if 'location' not in norm and (searched_region or searched_province):
-            camp_city     = (c.get('city') or '').lower()
-            camp_region   = (c.get('region') or '').lower()
-            camp_province = (c.get('province') or '').lower()
-            if searched_region and searched_region in camp_city:
-                s += 0.18  # city match — most precise
-            elif searched_region and searched_region in camp_region:
-                s += 0.15
-            elif searched_province and searched_province in camp_province:
-                s += 0.08
-
-        # When no age searched, reward tighter age range (more focused program)
+        # Tightness bonus when age not searched
         if 'age' not in norm:
             age_min = c.get('age_min')
             age_max = c.get('age_max')
             if age_min is not None and age_max is not None:
-                range_size = max(age_max - age_min, 1)
-                tightness  = max(0.0, 1.0 - (range_size - 1) / 18)
-                s += 0.05 * tightness
+                tightness = max(0.0, 1.0 - (max(age_max - age_min, 1) - 1) / 18)
+                s += 0.03 * tightness
 
         return round(s, 4)
 
-    # Score all camps
     for c in camps:
         c['_relevancy'] = score_camp(c)
 
-    # Sort: relevancy DESC, tier ASC
     camps.sort(key=lambda c: (
         -c['_relevancy'],
         TIER_RANK.get(c.get('listing_tier'), 4)
     ))
-
     return camps
+
 
 def build_camp_url(c):
     """Return session-level URL when exactly 1 session matched, else camp URL."""
@@ -1056,7 +988,14 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         # Default: treat as fresh
         filters = new_filters_peek
     # Step 3: Fetch matching camps from camps_clean
-    camps, province, region, fallback = search_camps(filters, config, named_camp=named_camp_override if 'named_camp_override' in locals() else None)
+    # Build engine once — reused for embeddings and search
+    from sqlalchemy import create_engine as _ce
+    _search_engine = _ce(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
+    camps, province, region, fallback = search_camps(
+        filters, config,
+        named_camp=named_camp_override if 'named_camp_override' in locals() else None,
+        engine=_search_engine
+    )
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -1151,6 +1090,16 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         ), elapsed, filters
 
     # Score and rank all candidates
+    # Apply semantic scoring if embeddings are ready — otherwise neutral 0.5 scores
+    activity_query = (filters.get('activity') or '').strip()
+    if activity_query and embeddings_are_ready(_search_engine):
+        raw_deduped = semantic_score_camps(
+            raw_deduped, activity_query, config['GEMINI_API_KEY'], _search_engine
+        )
+    else:
+        for c in raw_deduped:
+            c['_semantic_score'] = 0.5  # neutral — no activity searched or no embeddings yet
+
     scored = score_and_rank(raw_deduped, filters, fallback)
     top_score = scored[0].get('_relevancy', 0) if scored else 0
 
@@ -1579,8 +1528,120 @@ with st.spinner("Loading member camps..."):
     client_camps = load_client_camps(config)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
+
+def _show_embedding_admin(config):
+    """Sidebar widget for building / refreshing the semantic search index."""
+    import requests as _r, json as _j, time as _t
+    from sqlalchemy import create_engine as _ce, text as _tx
+
+    try:
+        _eng = _ce(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
+        _ready = embeddings_are_ready(_eng)
+    except Exception as _e:
+        st.error(f"DB error: {_e}")
+        return
+
+    if _ready:
+        with _eng.connect() as _c:
+            _n = _c.execute(_tx("SELECT COUNT(*) FROM camp_directory.camp_embeddings")).scalar()
+        st.success(f"Search index ready — {_n} camps indexed")
+    else:
+        st.warning("Search index not built — results use basic matching only")
+
+    if not st.button("Build / Refresh Search Index", use_container_width=True):
+        return
+
+    def _fingerprint(camp):
+        parts = []
+        if camp.get("camp_name"):  parts.append(f"Camp: {camp['camp_name']}.")
+        if camp.get("description"):parts.append(f"About: {camp['description']}")
+        if camp.get("activities"): parts.append(f"Activities: {camp['activities']}.")
+        if camp.get("programs"):
+            ps = [p.strip() for p in camp["programs"].split("|||") if p.strip()]
+            if ps: parts.append("Programs: " + " | ".join(ps[:20]))
+        if camp.get("camp_style"): parts.append(f"Type: {camp['camp_style']} camp.")
+        if camp.get("city") and camp.get("province"):
+            parts.append(f"Location: {camp['city']}, {camp['province']}.")
+        if camp.get("age_min") is not None:
+            parts.append(f"Ages: {camp['age_min']} to {camp['age_max']}.")
+        return " ".join(parts)
+
+    EMBED_URL = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"text-embedding-004:embedContent?key={config['GEMINI_API_KEY']}"
+    )
+    CAMP_SQL = _tx("""
+        SELECT cc.cid, cc.camp_name, cc.description, cc.camp_style,
+               cc.province, MIN(sc.city) AS city,
+               GROUP_CONCAT(DISTINCT sc.specialty_label
+                   ORDER BY sc.specialty_label SEPARATOR ', ') AS activities,
+               GROUP_CONCAT(
+                   DISTINCT CONCAT(sc.class_name, COALESCE(
+                       IF(NULLIF(TRIM(s.mini_description),'') IS NOT NULL,
+                          CONCAT(' --- ', TRIM(s.mini_description)), NULL),
+                       IF(NULLIF(TRIM(s.description),'') IS NOT NULL,
+                          CONCAT(' --- ', LEFT(TRIM(s.description),200)), NULL), ''))
+                   ORDER BY sc.listing_tier SEPARATOR ' ||| ') AS programs,
+               MIN(sc.age_from) AS age_min, MAX(sc.age_to) AS age_max
+        FROM camp_directory.camps_clean cc
+        JOIN camp_directory.sessions_clean sc
+            ON sc.cid=cc.cid AND sc.province=cc.province
+        LEFT JOIN camp_directory.sessions s ON s.id=sc.session_id
+        WHERE cc.status=1 AND sc.status=1 AND sc.is_virtual=0
+        GROUP BY cc.cid, cc.camp_name, cc.description, cc.camp_style, cc.province
+    """)
+
+    with st.spinner("Building search index... (~2 min)"):
+        try:
+            with _eng.connect() as _c:
+                _res = _c.execute(CAMP_SQL)
+                _cols = list(_res.keys())
+                _camps = [dict(zip(_cols, r)) for r in _res.fetchall()]
+
+            _ok, _fail = 0, 0
+            _prog = st.progress(0, text="Indexing camps...")
+            for _i, _camp in enumerate(_camps):
+                try:
+                    _fp   = _fingerprint(_camp)
+                    _resp = _r.post(EMBED_URL,
+                                    headers={"Content-Type": "application/json"},
+                                    json={"model": "models/text-embedding-004",
+                                          "content": {"parts": [{"text": _fp}]},
+                                          "taskType": "RETRIEVAL_DOCUMENT"},
+                                    timeout=20)
+                    _resp.raise_for_status()
+                    _vec = _resp.json()["embedding"]["values"]
+
+                    with _eng.connect() as _c2:
+                        _c2.execute(_tx("""
+                            INSERT INTO camp_directory.camp_embeddings
+                                (cid, embedding, fingerprint, updated_at)
+                            VALUES (:cid, :emb, :fp, NOW())
+                            ON DUPLICATE KEY UPDATE
+                                embedding=VALUES(embedding),
+                                fingerprint=VALUES(fingerprint),
+                                updated_at=NOW()
+                        """), {"cid": _camp["cid"], "emb": _j.dumps(_vec), "fp": _fp[:2000]})
+                        _c2.commit()
+                    _ok += 1
+                except Exception:
+                    _fail += 1
+
+                _prog.progress((_i + 1) / len(_camps),
+                               text=f"Indexed {_i+1}/{len(_camps)} camps...")
+                _t.sleep(0.1)
+
+            load_camp_embeddings.clear()  # bust cache so new embeddings used immediately
+            st.success(f"Done — {_ok} camps indexed, {_fail} failed")
+        except Exception as _e:
+            st.error(f"Index build failed: {_e}")
+
 with st.sidebar:
     st.markdown('<div class="sb-head">🔍 Camp Search Consultant</div>', unsafe_allow_html=True)
+
+    # Admin: Embedding Management
+    with st.expander("⚙️ Admin: Search Index", expanded=False):
+        _show_embedding_admin(config)
 
     with st.form("consultation_form"):
         st.markdown('<div class="sb-section">👤 About You</div>', unsafe_allow_html=True)
