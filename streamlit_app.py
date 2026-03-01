@@ -202,6 +202,54 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
 # CORE RAG PIPELINE
 # ═════════════════════════════════════════════
 
+def _validate_filters(filters, user_text):
+    """Strip filter values not evidenced in the raw message text.
+    Prevents Gemini from bleeding prior context into a fresh query.
+    """
+    import re
+    text = user_text.lower()
+    validated = dict(filters)
+
+    # Negation check — "not looking for X", "no longer want X", "forget X"
+    # If the activity appears in a negation context, strip it
+    negation_patterns = [
+        r"not looking for (\w+)",
+        r"no longer (?:want|looking for|need) (\w+)",
+        r"forget (?:the )?(\w+)",
+        r"don't want (\w+)",
+        r"not (?:interested in|after) (\w+)",
+    ]
+    negated_words = set()
+    for pat in negation_patterns:
+        for m in re.finditer(pat, text):
+            negated_words.add(m.group(1))
+
+    # Activity: must have a keyword hint in the message AND not be negated
+    activity = (filters.get('activity') or '').lower()
+    if activity:
+        activity_words = set(re.findall(r'\w+', activity))
+        is_negated = bool(activity_words & negated_words)
+        if is_negated or not any(w in text for w in activity_words if len(w) > 3):
+            validated['activity'] = None
+
+    # Gender: must have an explicit gender word
+    gender_words = ['girl', 'girls', 'boy', 'boys', 'female', 'male',
+                    'daughter', 'son', 'all-girls', 'all-boys']
+    if filters.get('gender') and not any(w in text for w in gender_words):
+        validated['gender'] = None
+
+    # Style: must have day/overnight keyword
+    style_words = ['overnight', 'day camp', 'residential', 'sleepover']
+    if filters.get('style') and not any(w in text for w in style_words):
+        validated['style'] = None
+
+    # Age: must have a number or age word
+    if filters.get('age') and not re.search(r'\d+\s*(?:yr|year|yrs)|teen|toddler', text):
+        validated['age'] = None
+
+    return validated
+
+
 def extract_filters(user_text, api_key):
     """Use Gemini to extract structured search filters from natural language"""
     system = """You are a camp search assistant. Extract search filters from the user message.
@@ -804,125 +852,65 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             # Take the longest title-case sequence as the most likely camp name
             named_camp_override = max(title_words, key=len)
 
-    # ── Layer 1: Fast conflict signals ──────────────────────────────────────
-    # Detect signals that suggest a NEW child / NEW search
-    new_search_signals = []
+    # ── Determine search intent: FRESH or REFINE ────────────────────────────
+    # Extract fresh filters from new message first, then decide whether to
+    # use standalone (fresh) or merge with last_filters (refine).
+    import re as _re
+    new_filters_peek = extract_filters(user_text, config['GEMINI_API_KEY'])
 
-    if last_filters:
-        prev_gender  = (last_filters.get('gender') or '').lower()
-        prev_age     = last_filters.get('age')
+    # Count independent filter signals present in the new message
+    def _count_signals(f, text):
+        n = 0
+        if f.get('activity'):                    n += 1
+        if f.get('gender'):                      n += 1
+        if f.get('style'):                       n += 1
+        if f.get('province') or f.get('region'): n += 1
+        if f.get('age') or _re.search(r'\d+\s*(?:year|yr)', text.lower()): n += 1
+        return n
 
-        # Gender flip signals
-        boy_words  = ['son', 'boy', 'his camp', 'for him', 'my boy', 'male', 'brother']
-        girl_words = ['daughter', 'girl', 'her camp', 'for her', 'my girl', 'female', 'sister']
+    new_signal_count = _count_signals(new_filters_peek, user_text)
 
-        if prev_gender == 'girls' and any(w in text_lower_check for w in boy_words):
-            new_search_signals.append('gender_flip')
-        if prev_gender == 'boys' and any(w in text_lower_check for w in girl_words):
-            new_search_signals.append('gender_flip')
+    # Gender flip — previous was girls, new message mentions boy (or vice versa)
+    boy_words  = ['son', 'boy', 'for him', 'my boy', 'brother']
+    girl_words = ['daughter', 'girl', 'for her', 'my girl', 'sister']
+    prev_gender   = (last_filters.get('gender') or '').lower() if last_filters else ''
+    gender_flip   = (
+        (prev_gender == 'girls' and any(w in text_lower_check for w in boy_words)) or
+        (prev_gender == 'boys'  and any(w in text_lower_check for w in girl_words))
+    )
+    is_new_child  = gender_flip  # used later for acknowledgement text
 
-        # Age conflict signals — extract age from new message
-        import re as _re
-        age_match = _re.search(r'(\d+)[\s-]?year', text_lower_check)
-        new_age = int(age_match.group(1)) if age_match else None
-        if new_age and prev_age:
-            # Flag if ages are far apart (>4 years) suggesting different child
-            if abs(new_age - prev_age) > 4:
-                new_search_signals.append('age_conflict')
+    # Activity change — new message explicitly requests a different activity
+    prev_activity = (last_filters.get('activity') or '').lower() if last_filters else ''
+    new_activity  = (new_filters_peek.get('activity') or '').lower()
+    activity_changed = bool(new_activity and prev_activity and new_activity != prev_activity)
 
-        # Explicit new-search phrases
-        explicit_new = [
-            'different camp', 'separate search', 'also looking for', 'my other child',
-            'another child', 'my other kid', 'different child', 'for my son', 'for my daughter',
-            'find me a camp for my', 'looking for a camp for my',
-        ]
-        if any(p in text_lower_check for p in explicit_new):
-            new_search_signals.append('explicit_new')
+    # ── Decision tree ────────────────────────────────────────────────────────
+    # FRESH  — message is self-contained (2+ own signals), activity changed,
+    #          gender flipped, or no prior context exists
+    # MERGE  — short additive reply to AI question or known refinement phrase
+    # REUSE  — pure affirmative ("yes", "sure", "ok")
 
-        # New activity signal — if the new message mentions a different activity
-        # than the previous search, treat as a fresh search (not a refinement)
-        prev_activity = (last_filters.get('activity') or '').lower().strip()
-        new_filters_peek = extract_filters(user_text, config['GEMINI_API_KEY'])
-        new_activity = (new_filters_peek.get('activity') or '').lower().strip()
-        if new_activity and prev_activity and new_activity != prev_activity:
-            new_search_signals.append('activity_change')
-            # Pre-set filters to the freshly extracted ones — no merge needed
-            _fresh_filters = new_filters_peek
+    if is_affirmative and last_filters:
+        # Pure yes/sure — reuse last filters exactly
+        filters = {k: v for k, v in last_filters.items()
+                   if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
 
-    # ── Layer 2: Gemini conflict check (only when signals are ambiguous) ────
-    # Fires when we have SOME signals but not a clear-cut case
-    search_intent = 'SAME'  # default
-
-    if last_filters and new_search_signals:
-        # Strong enough signals — classify as DIFFERENT without extra Gemini call
-        if 'gender_flip' in new_search_signals or 'explicit_new' in new_search_signals:
-            search_intent = 'DIFFERENT'
-        elif len(new_search_signals) >= 2:
-            search_intent = 'DIFFERENT'
-        else:
-            # Ambiguous — use a fast Gemini classification call
-            classify_system = (
-                "You are classifying a camp search conversation. "
-                "Reply with exactly one word: SAME, DIFFERENT, or CLARIFY."
-            )
-            classify_prompt = (
-                f"Previous search filters: {last_filters}\n"
-                f"New user message: \"{user_text}\"\n\n"
-                "Is the new message searching for the SAME child (refinement/follow-up), "
-                "a DIFFERENT child (new search), or is it UNCLEAR which child?"
-            )
-            classification = call_gemini(
-                classify_system, classify_prompt,
-                config['GEMINI_API_KEY'], max_tokens=10
-            ).strip().upper()
-            if classification in ('DIFFERENT', 'SAME', 'CLARIFY'):
-                search_intent = classification
-
-    # ── Route based on intent ────────────────────────────────────────────────
-    is_new_child = (search_intent == 'DIFFERENT')
-    needs_clarification = (search_intent == 'CLARIFY')
-
-    if needs_clarification:
-        # Return a clarification question immediately — don't search yet
-        elapsed = time.time() - start
-        prior_summary = []
-        if last_filters.get('gender'):   prior_summary.append(last_filters['gender'] + '-only')
-        if last_filters.get('style'):    prior_summary.append(last_filters['style'])
-        if last_filters.get('age'):      prior_summary.append(f"age {last_filters['age']}")
-        if last_filters.get('activity'): prior_summary.append(last_filters['activity'])
-        prior_str = ', '.join(prior_summary) if prior_summary else 'your previous search'
-        return (
-            f"Just to make sure I find the right fit — is this for the same child "
-            f"({prior_str}), or are you searching for a different child?",
-            elapsed,
-            last_filters
-        )
-
-    # Step 2: Extract / merge filters
-    # ─────────────────────────────────────────────────────────────────────────
-    if is_affirmative and last_filters and not is_new_child:
-        # Pure "yes/sure" — reuse filters as-is
-        filters = {k: v for k, v in last_filters.items() if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
-        combined = user_text
-
-    elif is_new_child or not last_filters or 'activity_change' in new_search_signals:
-        # New child / new activity / fresh search — extract clean filters, no inheritance
-        # Use pre-computed filters if activity_change already extracted them
-        filters = _fresh_filters if 'activity_change' in new_search_signals and '_fresh_filters' in locals() else extract_filters(user_text, config['GEMINI_API_KEY'])
-        combined = user_text
+    elif (not last_filters or
+          new_signal_count >= 2 or
+          activity_changed or
+          gender_flip):
+        # Self-contained or clearly new — fresh filters only, no inheritance
+        # Validate: strip any filter value not evidenced in the raw message text
+        filters = _validate_filters(new_filters_peek, user_text)
 
     elif ai_asked_question or is_pure_refinement or is_location_reply or is_correction:
-        # AI asked a follow-up OR user is adding detail to SAME search
-        # Merge: new filters override old, but old filters fill any gaps
-        new_filters = extract_filters(user_text, config['GEMINI_API_KEY'])
-        filters = {**last_filters, **{k: v for k, v in new_filters.items() if v is not None}}
-        combined = user_text
+        # Short additive reply — merge new detail into existing search
+        filters = {**last_filters, **{k: v for k, v in new_filters_peek.items() if v is not None}}
 
     else:
-        # Default: fresh extraction, no context
-        filters = extract_filters(user_text, config['GEMINI_API_KEY'])
-        combined = user_text
-
+        # Default: treat as fresh
+        filters = new_filters_peek
     # Step 3: Fetch matching camps from camps_clean
     camps, province, region, fallback = search_camps(filters, config, named_camp=named_camp_override if 'named_camp_override' in locals() else None)
 
