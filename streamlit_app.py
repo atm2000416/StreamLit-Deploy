@@ -1548,7 +1548,36 @@ def _show_embedding_admin(config):
     else:
         st.warning("Search index not built — results use basic matching only")
 
-    if not st.button("Build / Refresh Search Index", use_container_width=True):
+    # Test API connectivity before committing to full build
+    col1, col2 = st.columns(2)
+    _run_test  = col1.button("Test API", use_container_width=True)
+    _run_build = col2.button("Build Index", use_container_width=True)
+
+    if _run_test:
+        import requests as _tr
+        _test_url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"text-embedding-004:embedContent?key={config['GEMINI_API_KEY']}"
+        )
+        try:
+            _tr_resp = _tr.post(
+                _test_url,
+                headers={"Content-Type": "application/json"},
+                json={"model": "models/text-embedding-004",
+                      "content": {"parts": [{"text": "test"}]},
+                      "taskType": "RETRIEVAL_DOCUMENT"},
+                timeout=15
+            )
+            if _tr_resp.ok:
+                _dims = len(_tr_resp.json()["embedding"]["values"])
+                st.success(f"API OK — {_dims}-dim embedding returned")
+            else:
+                st.error(f"API error {_tr_resp.status_code}:\n{_tr_resp.text[:400]}")
+        except Exception as _te:
+            st.error(f"Connection failed: {_te}")
+        return
+
+    if not _run_build:
         return
 
     def _fingerprint(camp):
@@ -1598,7 +1627,22 @@ def _show_embedding_admin(config):
                 _cols = list(_res.keys())
                 _camps = [dict(zip(_cols, r)) for r in _res.fetchall()]
 
-            _ok, _fail = 0, 0
+            # Test first camp before running all 335 to surface errors early
+            _test_fp   = _fingerprint(_camps[0])
+            _test_resp = _r.post(EMBED_URL,
+                                 headers={"Content-Type": "application/json"},
+                                 json={"model": "models/text-embedding-004",
+                                       "content": {"parts": [{"text": _test_fp}]},
+                                       "taskType": "RETRIEVAL_DOCUMENT"},
+                                 timeout=20)
+            if not _test_resp.ok:
+                st.error(
+                    f"Embedding API error {_test_resp.status_code}: "
+                    f"{_test_resp.text[:500]}"
+                )
+                st.stop()
+
+            _ok, _fail, _errors = 0, 0, []
             _prog = st.progress(0, text="Indexing camps...")
             for _i, _camp in enumerate(_camps):
                 try:
@@ -1624,15 +1668,22 @@ def _show_embedding_admin(config):
                         """), {"cid": _camp["cid"], "emb": _j.dumps(_vec), "fp": _fp[:2000]})
                         _c2.commit()
                     _ok += 1
-                except Exception:
+                except Exception as _camp_err:
                     _fail += 1
+                    if len(_errors) < 3:  # capture first 3 errors for diagnosis
+                        _errors.append(f"cid={_camp.get('cid')} {_camp.get('camp_name','?')}: {_camp_err}")
 
                 _prog.progress((_i + 1) / len(_camps),
                                text=f"Indexed {_i+1}/{len(_camps)} camps...")
                 _t.sleep(0.1)
 
-            load_camp_embeddings.clear()  # bust cache so new embeddings used immediately
-            st.success(f"Done — {_ok} camps indexed, {_fail} failed")
+            load_camp_embeddings.clear()
+            if _ok > 0:
+                st.success(f"Done — {_ok} camps indexed, {_fail} failed")
+            else:
+                st.error(f"All {_fail} camps failed. First errors:")
+                for _e in _errors:
+                    st.code(_e)
         except Exception as _e:
             st.error(f"Index build failed: {_e}")
 
