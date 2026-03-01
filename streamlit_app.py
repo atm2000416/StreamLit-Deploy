@@ -270,19 +270,32 @@ def cosine_similarity(a: list, b: list) -> float:
 def get_query_embedding(query: str, api_key: str) -> list | None:
     """Embed a search query using Gemini embedding-001."""
     import requests as _req
+    # Discover available embedding model (cached implicitly via repeated calls)
+    try:
+        _list = _req.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            timeout=10
+        )
+        _embed_models = [
+            m["name"] for m in (_list.json().get("models", []) if _list.ok else [])
+            if "embedContent" in m.get("supportedGenerationMethods", [])
+        ]
+        _model = _embed_models[0] if _embed_models else "models/embedding-001"
+    except Exception:
+        _model = "models/embedding-001"
+
     url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        "embedding-001:embedContent"
-        f"?key={api_key}"
+        f"https://generativelanguage.googleapis.com/v1beta/"
+        f"{_model}:embedContent?key={api_key}"
     )
     try:
         resp = _req.post(
             url,
             headers={"Content-Type": "application/json"},
             json={
-                "model": "models/embedding-001",
+                "model": _model,
                 "content": {"parts": [{"text": query}]},
-                "taskType": "RETRIEVAL_QUERY",   # query vs document distinction
+                "taskType": "RETRIEVAL_QUERY",
             },
             timeout=15,
         )
@@ -1555,24 +1568,50 @@ def _show_embedding_admin(config):
 
     if _run_test:
         import requests as _tr
-        _test_url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"embedding-001:embedContent?key={config['GEMINI_API_KEY']}"
-        )
+        _api_key = config['GEMINI_API_KEY']
+
+        # Step 1: List available models to find working embedding model
+        st.write("**Checking available models...**")
         try:
-            _tr_resp = _tr.post(
-                _test_url,
-                headers={"Content-Type": "application/json"},
-                json={"model": "models/embedding-001",
-                      "content": {"parts": [{"text": "test"}]},
-                      "taskType": "RETRIEVAL_DOCUMENT"},
+            _list_resp = _tr.get(
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={_api_key}",
                 timeout=15
             )
-            if _tr_resp.ok:
-                _dims = len(_tr_resp.json()["embedding"]["values"])
-                st.success(f"API OK — {_dims}-dim embedding returned")
+            if _list_resp.ok:
+                _models = _list_resp.json().get("models", [])
+                _embed_models = [
+                    m["name"] for m in _models
+                    if "embedContent" in m.get("supportedGenerationMethods", [])
+                ]
+                if _embed_models:
+                    st.success(f"Found {len(_embed_models)} embedding model(s):")
+                    for _m in _embed_models:
+                        st.code(_m)
+                    # Auto-test the first available one
+                    _best = _embed_models[0]
+                    _model_id = _best.split("/")[-1]  # e.g. "embedding-001"
+                    st.write(f"Testing `{_best}`...")
+                    _test_resp = _tr.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/{_best}:embedContent?key={_api_key}",
+                        headers={"Content-Type": "application/json"},
+                        json={"model": _best,
+                              "content": {"parts": [{"text": "test"}]},
+                              "taskType": "RETRIEVAL_DOCUMENT"},
+                        timeout=15
+                    )
+                    if _test_resp.ok:
+                        _dims = len(_test_resp.json()["embedding"]["values"])
+                        st.success(f"✅ Working model found: `{_best}` — {_dims} dimensions")
+                        st.info(f"Update EMBED_MODEL in the code to: `{_best}`")
+                    else:
+                        st.error(f"Model listed but embedContent failed: {_test_resp.text[:300]}")
+                else:
+                    st.error("No embedding models available for this API key")
+                    st.write("All models:")
+                    for _m in _models[:10]:
+                        st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
             else:
-                st.error(f"API error {_tr_resp.status_code}:\n{_tr_resp.text[:400]}")
+                st.error(f"ListModels failed {_list_resp.status_code}: {_list_resp.text[:300]}")
         except Exception as _te:
             st.error(f"Connection failed: {_te}")
         return
@@ -1595,9 +1634,32 @@ def _show_embedding_admin(config):
             parts.append(f"Ages: {camp['age_min']} to {camp['age_max']}.")
         return " ".join(parts)
 
+    # Auto-discover working embedding model
+    import requests as _disc
+    _api_key = config['GEMINI_API_KEY']
+    _embed_model = None
+    try:
+        _lr = _disc.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={_api_key}",
+            timeout=10
+        )
+        if _lr.ok:
+            _avail = [
+                m["name"] for m in _lr.json().get("models", [])
+                if "embedContent" in m.get("supportedGenerationMethods", [])
+            ]
+            if _avail:
+                _embed_model = _avail[0]
+    except Exception:
+        pass
+
+    if not _embed_model:
+        st.error("No embedding models found for this API key. Run 'Test API' to diagnose.")
+        return
+
     EMBED_URL = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"embedding-001:embedContent?key={config['GEMINI_API_KEY']}"
+        f"https://generativelanguage.googleapis.com/v1beta/"
+        f"{_embed_model}:embedContent?key={_api_key}"
     )
     CAMP_SQL = _tx("""
         SELECT cc.cid, cc.camp_name, cc.description, cc.camp_style,
@@ -1631,7 +1693,7 @@ def _show_embedding_admin(config):
             _test_fp   = _fingerprint(_camps[0])
             _test_resp = _r.post(EMBED_URL,
                                  headers={"Content-Type": "application/json"},
-                                 json={"model": "models/embedding-001",
+                                 json={"model": _embed_model,
                                        "content": {"parts": [{"text": _test_fp}]},
                                        "taskType": "RETRIEVAL_DOCUMENT"},
                                  timeout=20)
@@ -1649,7 +1711,7 @@ def _show_embedding_admin(config):
                     _fp   = _fingerprint(_camp)
                     _resp = _r.post(EMBED_URL,
                                     headers={"Content-Type": "application/json"},
-                                    json={"model": "models/embedding-001",
+                                    json={"model": _embed_model,
                                           "content": {"parts": [{"text": _fp}]},
                                           "taskType": "RETRIEVAL_DOCUMENT"},
                                     timeout=20)
