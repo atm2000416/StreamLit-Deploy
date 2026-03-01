@@ -308,40 +308,19 @@ def search_camps(filters, config, limit=20, named_camp=None):
     from sqlalchemy import create_engine, text
 
     # Region mapping for common cities/districts
-    region_map = {
-        'toronto': 'Toronto', 'etobicoke': 'Toronto', 'scarborough': 'Toronto',
-        'north york': 'Toronto', 'east york': 'Toronto',
-        'thornhill': 'York', 'richmond hill': 'York', 'markham': 'York',
-        'oakville': 'Halton - Peel', 'mississauga': 'Halton - Peel',
-        'brampton': 'Halton - Peel', 'burlington': 'Halton - Peel',
-        'ajax': 'Durham', 'pickering': 'Durham', 'oshawa': 'Durham', 'whitby': 'Durham',
-        'ottawa': 'Ottawa Region', 'nepean': 'Ottawa Region',
-        'kanata': 'Ottawa Region', 'gloucester': 'Ottawa Region',
-        'vancouver': 'Lower Mainland', 'burnaby': 'Lower Mainland',
-        'surrey': 'Lower Mainland', 'richmond': 'Lower Mainland',
-        'victoria': 'Vancouver Island', 'kelowna': 'Okanagan',
-        'calgary': 'Calgary', 'edmonton': 'Edmonton',
-        'winnipeg': 'Manitoba', 'montreal': 'Montreal',
-        'halifax': 'Halifax', 'hamilton': 'City of Hamilton',
-        'waterloo': 'Waterloo - Wellington', 'kitchener': 'Waterloo - Wellington',
-        'kingston': 'Kingston - Prince Edward', 'barrie': 'Barrie - Orillia - Midland',
-    }
+    # region_map removed — city/region resolved directly from DB (sessions_clean.city)
+    # Minimal fallback for province inference when city not in DB
+    region_map = {}
+    # city_province_map removed — province inferred from DB via city lookup
+    # Kept as minimal fallback for province-only queries
     city_province_map = {
-        'toronto': 'Ontario', 'etobicoke': 'Ontario', 'scarborough': 'Ontario',
-        'north york': 'Ontario', 'east york': 'Ontario', 'thornhill': 'Ontario',
-        'richmond hill': 'Ontario', 'markham': 'Ontario', 'oakville': 'Ontario',
-        'mississauga': 'Ontario', 'brampton': 'Ontario', 'burlington': 'Ontario',
-        'ajax': 'Ontario', 'pickering': 'Ontario', 'oshawa': 'Ontario',
-        'whitby': 'Ontario', 'ottawa': 'Ontario', 'nepean': 'Ontario',
-        'kanata': 'Ontario', 'gloucester': 'Ontario', 'hamilton': 'Ontario',
-        'waterloo': 'Ontario', 'kitchener': 'Ontario', 'kingston': 'Ontario',
-        'barrie': 'Ontario', 'london': 'Ontario',
-        'vancouver': 'British Columbia', 'burnaby': 'British Columbia',
-        'surrey': 'British Columbia', 'richmond': 'British Columbia',
-        'victoria': 'British Columbia', 'kelowna': 'British Columbia',
+        'montreal': 'Quebec', 'laval': 'Quebec', 'longueuil': 'Quebec',
+        'gatineau': 'Quebec', 'sherbrooke': 'Quebec', 'quebec city': 'Quebec',
+        'vancouver': 'British Columbia', 'victoria': 'British Columbia',
         'calgary': 'Alberta', 'edmonton': 'Alberta',
-        'winnipeg': 'Manitoba', 'montreal': 'Quebec',
-        'halifax': 'Nova Scotia',
+        'winnipeg': 'Manitoba', 'ottawa': 'Ontario', 'toronto': 'Ontario',
+        'halifax': 'Nova Scotia', 'winnipeg': 'Manitoba',
+        'saskatoon': 'Saskatchewan', 'regina': 'Saskatchewan',
     }
 
     province = filters.get('province')
@@ -352,11 +331,17 @@ def search_camps(filters, config, limit=20, named_camp=None):
     style    = filters.get('style')
     gender   = filters.get('gender')  # 'girls', 'boys', or None
 
-    # Resolve region/city to province if not set
+    # Resolve city/region using DB as source of truth
+    # city field in sessions_clean comes from extra_locations.city (ground truth)
     region_lower = (region or '').lower().strip()
+
+    # Infer province from city if not explicitly provided (minimal fallback map)
     if not province and region_lower in city_province_map:
         province = city_province_map[region_lower]
-    resolved_region = region_map.get(region_lower, region)
+
+    # Treat region input as EITHER a city name OR a region name — DB handles both
+    # region_map is now empty; resolved_region = raw region string from filters
+    resolved_region = region_lower  # pass raw to DB city search
 
     conditions = ["sc.status = 1", "sc.province != 'Unknown'", "sc.is_virtual = 0"]
     params = {}
@@ -366,7 +351,9 @@ def search_camps(filters, config, limit=20, named_camp=None):
         params['province'] = province
 
     if resolved_region:
-        conditions.append("sc.region LIKE :region")
+        # Search city column first (exact source of truth), then region name
+        conditions.append("(sc.city LIKE :city OR sc.region LIKE :region)")
+        params['city']   = f"%{resolved_region}%"
         params['region'] = f"%{resolved_region}%"
 
     if activity:
@@ -722,10 +709,13 @@ def score_and_rank(camps, filters, fallback):
 
         # ── Location ────────────────────────────────────────────────────────
         if 'location' in norm:
+            camp_city     = (c.get('city') or '').lower()       # ground truth
             camp_region   = (c.get('region') or '').lower()
             camp_province = (c.get('province') or '').lower()
-            if searched_region and searched_region in camp_region:
-                s += norm['location']           # exact region match
+            if searched_region and searched_region in camp_city:
+                s += norm['location']           # exact city match (best)
+            elif searched_region and searched_region in camp_region:
+                s += norm['location'] * 0.85    # region match
             elif searched_province and searched_province in camp_province:
                 s += norm['location'] * 0.6     # province match only
             elif fallback in ('province_only', 'no_match'):
@@ -761,9 +751,12 @@ def score_and_rank(camps, filters, fallback):
         # ── Optional signals (no specific filter searched) ──────────────────
         # When no activity searched, reward location precision
         if 'location' not in norm and (searched_region or searched_province):
+            camp_city     = (c.get('city') or '').lower()
             camp_region   = (c.get('region') or '').lower()
             camp_province = (c.get('province') or '').lower()
-            if searched_region and searched_region in camp_region:
+            if searched_region and searched_region in camp_city:
+                s += 0.18  # city match — most precise
+            elif searched_region and searched_region in camp_region:
                 s += 0.15
             elif searched_province and searched_province in camp_province:
                 s += 0.08
@@ -887,10 +880,10 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
 
     if fallback and fallback != 'exact':
         fallback_notes = {
-            'no_activity_in_region':   f"*No {act_label} camps found near {region} — showing other camps in the area.*\n\n",
-            'no_activity_in_province': f"*No {act_label} camps found in {province} — showing other camps in the province.*\n\n",
-            'province_only':           f"*No exact match — showing camps in {province}.*\n\n",
-            'no_match':                "*No exact matches — showing top available camps.*\n\n",
+            'no_activity_in_region':   f"*Showing the best {act_label} camps available near {region or province}.*\n\n",
+            'no_activity_in_province': f"*Showing the best {act_label} camps available in {province}.*\n\n",
+            'province_only':           f"*Showing camps across {province} — you may want to filter by city.*\n\n",
+            'no_match':                "*Showing the closest available matches.*\n\n",
         }
         intro += fallback_notes.get(fallback, '')
 
@@ -968,7 +961,12 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'ontario', 'quebec', 'bc', 'british columbia', 'alberta', 'manitoba',
         'saskatchewan', 'nova scotia', 'new brunswick', 'pei', 'newfoundland',
         'toronto', 'vancouver', 'calgary', 'edmonton', 'ottawa', 'montreal',
-        'i am from', "i'm from", 'we are in', "we're in", 'located in',
+        'laval', 'longueuil', 'gatineau', 'sherbrooke', 'quebec city', 'levis',
+        'hamilton', 'waterloo', 'kitchener', 'london', 'barrie', 'kingston',
+        'peterborough', 'sudbury', 'thunder bay', 'windsor', 'niagara',
+        'burnaby', 'surrey', 'richmond', 'victoria', 'kelowna', 'abbotsford',
+        'winnipeg', 'saskatoon', 'regina', 'halifax', 'moncton',
+        'i am from', "i'm from", 'we are in', "we're in", 'located in', 'in ',
     ]
     is_location_reply = any(w in text_lower_check for w in location_words)
 
