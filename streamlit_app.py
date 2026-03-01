@@ -293,7 +293,12 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
     try:
         # Strip markdown code fences if present
         clean = re.sub(r'```json|```', '', result).strip()
-        return json.loads(clean)
+        parsed = json.loads(clean)
+        # Strip non-province values — 'Canada' etc. are not DB provinces
+        prov = (parsed.get('province') or '').strip()
+        if prov.lower() in ('canada', 'all', 'any', 'nationwide', 'national'):
+            parsed['province'] = None
+        return parsed
     except:
         return {}
 
@@ -1043,7 +1048,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     elif ai_asked_question or is_pure_refinement or is_location_reply or is_correction:
         # Short additive reply — merge new detail into existing search
-        filters = {**last_filters, **{k: v for k, v in new_filters_peek.items() if v is not None}}
+        # Strip any non-DB province values from last_filters before merging
+        clean_last = {k: v for k, v in last_filters.items()}
+        if (clean_last.get('province') or '').lower() in ('canada', 'all', 'any', 'nationwide'):
+            clean_last['province'] = None
+        filters = {**clean_last, **{k: v for k, v in new_filters_peek.items() if v is not None}}
 
     else:
         # Default: treat as fresh
@@ -1114,13 +1123,20 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # Step 4: Deduplicate then enforce gold-first cap — gold always included
     raw_deduped = dedupe_camps(camps) if camps else []
 
-    # BUG 2 FIX: If fallback kicked in AND user searched a specific activity,
-    # the returned camps don't match — don't show them, return honest no-results
+    # If fallback kicked in AND user searched a specific activity → wrong results
+    # Also catch cases where main query "succeeded" but scores are near-zero (bad match)
     activity_searched = (filters.get('activity') or '').strip()
     is_activity_fallback = (
         activity_searched and
         fallback in ('no_activity_in_region', 'no_activity_in_province', 'province_only', 'no_match')
     )
+    # Score-based safety net: if ALL returned camps score < 0.15, results are irrelevant
+    if not is_activity_fallback and activity_searched and raw_deduped:
+        scored_preview = score_and_rank(list(raw_deduped), filters, fallback)
+        top_score = scored_preview[0].get('_relevancy', 0) if scored_preview else 0
+        if top_score < 0.15:
+            is_activity_fallback = True
+            raw_deduped = []  # force no-results path
 
     if not raw_deduped or is_activity_fallback:
         elapsed = time.time() - start
