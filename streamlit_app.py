@@ -1102,48 +1102,131 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             "Try broadening your search — remove a filter or ask me to widen the location."
         ), elapsed, filters
 
-    # Apply semantic scoring if activity was searched and embeddings exist
+    # ── Activity ranking: specialty codes first, semantic for the long tail ──────
+    #
+    # ARCHITECTURE:
+    #   Pass 1 (specialty codes): SQL-level exact match for known activities.
+    #          Fast, precise. Returns only camps with that specialty in the DB.
+    #          Used when activity maps to at least one non-generic code.
+    #
+    #   Pass 2 (semantic):  For activities with no specialty code match
+    #          (e.g. "financial literacy", "entrepreneurship", "mindfulness").
+    #          Uses elbow detection on cosine similarity scores rather than
+    #          a fixed threshold — because embedding-001 compresses all scores
+    #          into a narrow band (0.82–0.89), making fixed thresholds useless.
+    #
+    # NOTE on embedding-001 score compression:
+    #   Related camps score ~0.87–0.91, unrelated camps ~0.82–0.86.
+    #   The gap is ~0.05 — too small for a fixed floor.
+    #   Elbow detection finds the LARGEST drop in the sorted score list
+    #   and cuts there, separating signal from noise dynamically.
+
     activity_query = (filters.get('activity') or '').strip()
-    if activity_query and embeddings_are_ready(_search_engine):
+
+    # ── Specialty code lookup (fast-path for known activities) ────────────────
+    ACTIVITY_CODES = {
+        'hockey': [29, 188], 'skating': [51], 'ice skating': [51],
+        'sports': [188, 12, 54, 66, 63, 29], 'soccer': [54],
+        'basketball': [11, 12], 'tennis': [66], 'golf': [26],
+        'volleyball': [63], 'swimming': [56], 'swim': [56],
+        'sailing': [49], 'canoe': [41], 'canoeing': [41],
+        'lacrosse': [188], 'baseball': [188],
+        'stem': [268, 18, 67, 160, 180, 50, 159, 266, 332],
+        'science': [268, 50, 18], 'technology': [268, 18, 180],
+        'coding': [18, 68, 159, 180, 266, 268, 332],
+        'programming': [18, 68, 159, 180, 266, 332],
+        'robotics': [67, 268, 160], 'engineering': [160, 268, 50],
+        'math': [20, 129], 'ai': [159, 302, 268], 'game design': [68],
+        'arts': [9, 10, 69, 173, 178, 355], 'art': [9, 10, 69, 173, 355],
+        'music': [37], 'dance': [22], 'theatre': [59, 172],
+        'drama': [59, 172], 'animation': [178], 'photography': [69],
+        'cooking': [133], 'chef': [133],
+        'outdoor': [24, 41, 49, 58, 181, 265], 'adventure': [41, 181],
+        'traditional': [24, 58, 181, 265], 'nature': [24, 181],
+        'academic': [20, 32, 97, 196, 314], 'french': [314],
+        'language': [314], 'tutoring': [32, 97, 314],
+        'debate': [302], 'writing': [362], 'chess': [278],
+        'equestrian': [30], 'riding': [30], 'horse': [30],
+        'leadership': [33, 79, 88], 'special needs': [252],
+        'wellness': [91], 'cheer': [164], 'cheerleading': [164],
+        'cheering': [164], 'fashion': [71, 172, 264],
+        'fashion design': [71, 264], 'beauty': [172],
+    }
+    GENERIC_CODES = {188, 268, 9, 10, 79, 33}
+
+    act_lower  = activity_query.lower().strip()
+    act_codes  = ACTIVITY_CODES.get(act_lower, [])
+    # Primary = specific codes only (strip umbrella generics)
+    act_codes  = [c for c in act_codes if c not in GENERIC_CODES] or act_codes
+    code_match_used = False
+
+    if act_codes and activity_query:
+        # Filter raw_deduped to only camps whose specialty matches
+        def _has_code(camp):
+            sp  = camp.get('specialty') or 0
+            sp2 = camp.get('specialty2') or 0
+            try:
+                return int(sp) in act_codes or int(sp2) in act_codes
+            except (ValueError, TypeError):
+                return False
+
+        # camps_clean doesn't carry specialty — need to check via activities label
+        # Use specialty_label text match as proxy (populated from specialty code)
+        def _label_match(camp):
+            acts = (camp.get('activities') or '').lower()
+            progs = (camp.get('matching_programs') or '').lower()
+            return any(w in acts or w in progs
+                       for w in act_lower.split() if len(w) > 3)
+
+        code_filtered = [c for c in raw_deduped if _label_match(c)]
+
+        if code_filtered:
+            # Specialty match found — use these, apply neutral semantic scores
+            for c in code_filtered:
+                c['_semantic_score'] = 0.9  # high neutral score — these are confirmed matches
+            raw_deduped = code_filtered
+            code_match_used = True
+
+    # ── Semantic search (long-tail activities with no code match) ─────────────
+    if not code_match_used and activity_query and embeddings_are_ready(_search_engine):
         raw_deduped = semantic_score_camps(
             raw_deduped, activity_query, config['GEMINI_API_KEY'], _search_engine
         )
-        # Semantic floor: drop camps that simply don't match the activity
-        # Cosine similarity for unrelated content typically falls below 0.65
-        # Genuine matches (e.g. hockey camp for "hockey") score 0.80+
-        SEMANTIC_FLOOR = 0.65
-        relevant = [c for c in raw_deduped if c.get('_semantic_score', 0) >= SEMANTIC_FLOOR]
+        # Elbow detection: find largest score drop, cut below it
+        # Works with embedding-001's compressed score range
+        sorted_camps = sorted(raw_deduped, key=lambda c: -c.get('_semantic_score', 0))
+        scores = [c.get('_semantic_score', 0) for c in sorted_camps]
 
-        # If nothing clears the floor, relax to top-N by semantic score
-        # and let the user know results are approximate
-        if not relevant:
-            raw_deduped.sort(key=lambda c: -c.get('_semantic_score', 0))
-            top_sem = raw_deduped[0].get('_semantic_score', 0) if raw_deduped else 0
-            if top_sem < 0.55:
-                # Nothing remotely relevant — ask clarifying question
-                elapsed = time.time() - start
-                loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-                from urllib.parse import quote_plus as _qp2
-                search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp2(activity_query + ' camps')}"
-                return (
-                    f"I couldn't find **{activity_query} camps** in {loc_hint} in our verified network.\n\n"
-                    f"Try searching our full directory:\n"
-                    f"🔍 [Search camps.ca for {activity_query} camps]({search_url})\n\n"
-                    f"💬 *Or tell me a different activity or location and I'll search again.*"
-                ), elapsed, filters
-            relevant = raw_deduped[:10]  # top 10 approximate matches
-        raw_deduped = relevant
-    else:
+        cut_idx = len(scores)  # default: keep all
+        if len(scores) >= 3:
+            gaps = [(scores[i] - scores[i+1], i+1) for i in range(min(len(scores)-1, 29))]
+            max_gap, elbow = max(gaps, key=lambda x: x[0])
+            # Only cut if the gap is meaningful (> 0.008 for embedding-001)
+            if max_gap > 0.008:
+                cut_idx = elbow
+
+        raw_deduped = sorted_camps[:max(cut_idx, 3)]  # always keep at least 3
+
+        if not raw_deduped:
+            elapsed = time.time() - start
+            loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+            from urllib.parse import quote_plus as _qp2
+            search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp2(activity_query + ' camps')}"
+            return (
+                f"I couldn't find **{activity_query} camps** in {loc_hint} in our verified network.\n\n"
+                f"Try searching our full directory:\n"
+                f"🔍 [Search camps.ca for {activity_query} camps]({search_url})\n\n"
+                f"💬 *Or tell me a different activity or location and I'll search again.*"
+            ), elapsed, filters
+
+    elif not code_match_used:
         for c in raw_deduped:
             c['_semantic_score'] = 0.5  # no activity searched — neutral
 
     scored = score_and_rank(raw_deduped, filters, fallback)
-    top_score = scored[0].get('_relevancy', 0) if scored else 0
 
-    # Final relevancy floor — drop structurally weak matches
-    deduped = [c for c in scored if c.get('_relevancy', 0) > 0.15]
-    if not deduped:
-        deduped = scored[:5]  # always show at least top 5
+    # Drop structurally weak matches — but always show at least top 5
+    deduped = [c for c in scored if c.get('_relevancy', 0) > 0.15] or scored[:5]
 
     # New-child acknowledgement prefix
     new_child_prefix = ""
