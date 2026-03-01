@@ -464,7 +464,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
     # region_map is now empty; resolved_region = raw region string from filters
     resolved_region = region_lower  # pass raw to DB city search
 
-    conditions = ["sc.status = 1", "sc.province != 'Unknown'", "sc.is_virtual = 0"]
+    conditions = ["sc.status = 1", "sc.province != 'Unknown'", "sc.province != 'Virtual Program'", "sc.is_virtual = 0"]
     params = {}
 
     if province:
@@ -616,7 +616,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                     "cc.description "
                     "FROM camp_directory.sessions_clean sc "
                     "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
-                    "WHERE sc.status=1 AND sc.province=:p AND sc.is_virtual=0 "
+                    "WHERE sc.status=1 AND sc.province=:p AND sc.province != 'Virtual Program' AND sc.is_virtual=0 "
                     "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
                     "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
                 ), {"p": province, "lim": limit})
@@ -637,7 +637,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                 "cc.description "
                 "FROM camp_directory.sessions_clean sc "
                 "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
-                "WHERE sc.status=1 AND sc.province != 'Unknown' AND sc.is_virtual=0 "
+                "WHERE sc.status=1 AND sc.province != 'Unknown' AND sc.province != 'Virtual Program' AND sc.is_virtual=0 "
                 "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
                 "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
             ), {"lim": limit})
@@ -1027,12 +1027,19 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
           activity_changed or
           gender_flip):
         # Self-contained or clearly new — fresh filters only, no inheritance
-        # Validate: strip any filter value not evidenced in the raw message text
         filters = _validate_filters(new_filters_peek, user_text)
+
+        # CRITICAL: If the new message adds location/age/style but no new activity,
+        # and the previous turn had an activity, inherit it.
+        # e.g. "hockey camps" → "this for age-10 in Toronto" should keep activity=hockey
+        if (last_filters and
+            not new_activity and
+            prev_activity and
+            not activity_changed):
+            filters['activity'] = last_filters['activity']
 
     elif ai_asked_question or is_pure_refinement or is_location_reply or is_correction:
         # Short additive reply — merge new detail into existing search
-        # Strip any non-DB province values from last_filters before merging
         clean_last = {k: v for k, v in last_filters.items()}
         if (clean_last.get('province') or '').lower() in ('canada', 'all', 'any', 'nationwide'):
             clean_last['province'] = None
