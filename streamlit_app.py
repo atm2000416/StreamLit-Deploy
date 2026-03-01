@@ -477,9 +477,50 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         params['city']   = f"%{resolved_region}%"
         params['region'] = f"%{resolved_region}%"
 
-    # Activity filter removed from SQL — handled by semantic search after SQL
-    # SQL only applies hard structural constraints (province, city, age, style, gender)
-    # This means ALL structurally valid camps are returned, then ranked by embedding similarity
+    # Activity: specialty codes go back into SQL for known activities (exact match).
+    # Unknown activities (no codes) → SQL returns all, semantic ranking applied after.
+    ACTIVITY_CODES_SQL = {
+        'hockey': [29, 188], 'skating': [51], 'ice skating': [51],
+        'sports': [188, 12, 54, 66, 63, 29], 'soccer': [54],
+        'basketball': [11, 12], 'tennis': [66], 'golf': [26],
+        'volleyball': [63], 'swimming': [56], 'swim': [56],
+        'sailing': [49], 'canoe': [41], 'canoeing': [41],
+        'lacrosse': [188], 'baseball': [188],
+        'stem': [268, 18, 67, 160, 180, 50, 159, 266, 332],
+        'science': [268, 50, 18], 'technology': [268, 18, 180],
+        'coding': [18, 68, 159, 180, 266, 268, 332],
+        'programming': [18, 68, 159, 180, 266, 332],
+        'robotics': [67, 268, 160], 'engineering': [160, 268, 50],
+        'math': [20, 129], 'ai': [159, 302, 268], 'game design': [68],
+        'arts': [9, 10, 69, 173, 178, 355], 'art': [9, 10, 69, 173, 355],
+        'music': [37], 'dance': [22], 'theatre': [59, 172],
+        'drama': [59, 172], 'animation': [178], 'photography': [69],
+        'cooking': [133], 'chef': [133],
+        'outdoor': [24, 41, 49, 58, 181, 265], 'adventure': [41, 181],
+        'traditional': [24, 58, 181, 265], 'nature': [24, 181],
+        'academic': [20, 32, 97, 196, 314], 'french': [314],
+        'language': [314], 'tutoring': [32, 97, 314],
+        'debate': [302], 'writing': [362], 'chess': [278],
+        'equestrian': [30], 'riding': [30], 'horse': [30],
+        'leadership': [33, 79, 88], 'special needs': [252],
+        'wellness': [91], 'cheer': [164], 'cheerleading': [164],
+        'cheering': [164], 'fashion': [71, 172, 264],
+        'fashion design': [71, 264], 'beauty': [172],
+    }
+    GENERIC_CODES_SQL = {188, 268, 9, 10, 79, 33}
+    _activity_has_codes = False
+
+    if activity:
+        act_lower_sql = activity.lower().strip()
+        sql_codes = ACTIVITY_CODES_SQL.get(act_lower_sql, [])
+        sql_codes = [c for c in sql_codes if c not in GENERIC_CODES_SQL] or sql_codes
+        if sql_codes:
+            code_list = ','.join(str(c) for c in sql_codes)
+            conditions.append(f'(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))')
+            _activity_has_codes = True
+        else:
+            # Unknown activity — no SQL filter, semantic ranking handles it post-query
+            pass
 
     if age:
         conditions.append("sc.age_from <= :age AND sc.age_to >= :age")
@@ -554,7 +595,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
             cols   = list(result.keys())
 
             if rows:
-                return [dict(zip(cols, row)) for row in rows], province, resolved_region, None
+                return [dict(zip(cols, row)) for row in rows], province, resolved_region, None, _activity_has_codes
 
             # Fallbacks 1 & 2 removed — activity is no longer a SQL filter.
             # Semantic search handles activity ranking after SQL returns candidates.
@@ -581,7 +622,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                 ), {"p": province, "lim": limit})
                 rows3 = r3.fetchall()
                 if rows3:
-                    return [dict(zip(list(r3.keys()), row)) for row in rows3], province, resolved_region, 'province_only'
+                    return [dict(zip(list(r3.keys()), row)) for row in rows3], province, resolved_region, 'province_only', _activity_has_codes
 
             # Fallback 4: top camps overall
             r4 = conn.execute(text(
@@ -601,10 +642,10 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                 "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
             ), {"lim": limit})
             rows4 = r4.fetchall()
-            return [dict(zip(list(r4.keys()), row)) for row in rows4], province, resolved_region, 'no_match'
+            return [dict(zip(list(r4.keys()), row)) for row in rows4], province, resolved_region, 'no_match', _activity_has_codes
 
     except Exception as e:
-        return [], province, resolved_region, f"error: {str(e)[:200]}"
+        return [], province, resolved_region, f"error: {str(e)[:200]}", False
 
 
 def clean_activities(activities_str):
@@ -1004,7 +1045,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # Build engine once — reused for embeddings and search
     from sqlalchemy import create_engine as _ce
     _search_engine = _ce(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
-    camps, province, region, fallback = search_camps(
+    camps, province, region, fallback, _activity_has_codes = search_camps(
         filters, config,
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
@@ -1123,69 +1164,14 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     activity_query = (filters.get('activity') or '').strip()
 
-    # ── Specialty code lookup (fast-path for known activities) ────────────────
-    ACTIVITY_CODES = {
-        'hockey': [29, 188], 'skating': [51], 'ice skating': [51],
-        'sports': [188, 12, 54, 66, 63, 29], 'soccer': [54],
-        'basketball': [11, 12], 'tennis': [66], 'golf': [26],
-        'volleyball': [63], 'swimming': [56], 'swim': [56],
-        'sailing': [49], 'canoe': [41], 'canoeing': [41],
-        'lacrosse': [188], 'baseball': [188],
-        'stem': [268, 18, 67, 160, 180, 50, 159, 266, 332],
-        'science': [268, 50, 18], 'technology': [268, 18, 180],
-        'coding': [18, 68, 159, 180, 266, 268, 332],
-        'programming': [18, 68, 159, 180, 266, 332],
-        'robotics': [67, 268, 160], 'engineering': [160, 268, 50],
-        'math': [20, 129], 'ai': [159, 302, 268], 'game design': [68],
-        'arts': [9, 10, 69, 173, 178, 355], 'art': [9, 10, 69, 173, 355],
-        'music': [37], 'dance': [22], 'theatre': [59, 172],
-        'drama': [59, 172], 'animation': [178], 'photography': [69],
-        'cooking': [133], 'chef': [133],
-        'outdoor': [24, 41, 49, 58, 181, 265], 'adventure': [41, 181],
-        'traditional': [24, 58, 181, 265], 'nature': [24, 181],
-        'academic': [20, 32, 97, 196, 314], 'french': [314],
-        'language': [314], 'tutoring': [32, 97, 314],
-        'debate': [302], 'writing': [362], 'chess': [278],
-        'equestrian': [30], 'riding': [30], 'horse': [30],
-        'leadership': [33, 79, 88], 'special needs': [252],
-        'wellness': [91], 'cheer': [164], 'cheerleading': [164],
-        'cheering': [164], 'fashion': [71, 172, 264],
-        'fashion design': [71, 264], 'beauty': [172],
-    }
-    GENERIC_CODES = {188, 268, 9, 10, 79, 33}
+    # ── Known activity: SQL already filtered by specialty code ──────────────────
+    # If SQL used specialty codes, camps in raw_deduped are confirmed matches.
+    # Give them high semantic scores and skip semantic search.
+    code_match_used = _activity_has_codes  # set during SQL build phase
 
-    act_lower  = activity_query.lower().strip()
-    act_codes  = ACTIVITY_CODES.get(act_lower, [])
-    # Primary = specific codes only (strip umbrella generics)
-    act_codes  = [c for c in act_codes if c not in GENERIC_CODES] or act_codes
-    code_match_used = False
-
-    if act_codes and activity_query:
-        # Filter raw_deduped to only camps whose specialty matches
-        def _has_code(camp):
-            sp  = camp.get('specialty') or 0
-            sp2 = camp.get('specialty2') or 0
-            try:
-                return int(sp) in act_codes or int(sp2) in act_codes
-            except (ValueError, TypeError):
-                return False
-
-        # camps_clean doesn't carry specialty — need to check via activities label
-        # Use specialty_label text match as proxy (populated from specialty code)
-        def _label_match(camp):
-            acts = (camp.get('activities') or '').lower()
-            progs = (camp.get('matching_programs') or '').lower()
-            return any(w in acts or w in progs
-                       for w in act_lower.split() if len(w) > 3)
-
-        code_filtered = [c for c in raw_deduped if _label_match(c)]
-
-        if code_filtered:
-            # Specialty match found — use these, apply neutral semantic scores
-            for c in code_filtered:
-                c['_semantic_score'] = 0.9  # high neutral score — these are confirmed matches
-            raw_deduped = code_filtered
-            code_match_used = True
+    if code_match_used:
+        for c in raw_deduped:
+            c['_semantic_score'] = 0.9  # confirmed specialty match
 
     # ── Semantic search (long-tail activities with no code match) ─────────────
     if not code_match_used and activity_query and embeddings_are_ready(_search_engine):
