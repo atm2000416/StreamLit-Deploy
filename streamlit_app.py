@@ -1057,6 +1057,15 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
     )
+    # DEBUG — remove after confirming fix
+    import streamlit as _st
+    _st.session_state['_debug_last'] = {
+        'filters': filters,
+        'fallback': fallback,
+        'activity_has_codes': _activity_has_codes,
+        'camp_count': len(camps),
+        'top5_camps': [c.get('camp_name') for c in camps[:5]],
+    }
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -1185,20 +1194,33 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         raw_deduped = semantic_score_camps(
             raw_deduped, activity_query, config['GEMINI_API_KEY'], _search_engine
         )
-        # Elbow detection: find largest score drop, cut below it
-        # Works with embedding-001's compressed score range
+        # Elbow detection: find meaningful score drop, cut below it.
+        #
+        # embedding-001 compresses scores into a narrow band (~0.82–0.91).
+        # Adjacent score gaps are typically 0.001–0.006 (noise).
+        # A real relevance boundary shows a gap of 0.015+ and only appears
+        # after the top cluster of genuinely relevant camps.
+        #
+        # Rules:
+        #   - Never cut before position 8 (always return at least 8 results)
+        #   - Only cut on gaps > 0.015 (above noise floor)
+        #   - Never cut after position 25 (cap at 25 semantic results)
         sorted_camps = sorted(raw_deduped, key=lambda c: -c.get('_semantic_score', 0))
         scores = [c.get('_semantic_score', 0) for c in sorted_camps]
 
-        cut_idx = len(scores)  # default: keep all
-        if len(scores) >= 3:
-            gaps = [(scores[i] - scores[i+1], i+1) for i in range(min(len(scores)-1, 29))]
-            max_gap, elbow = max(gaps, key=lambda x: x[0])
-            # Only cut if the gap is meaningful (> 0.008 for embedding-001)
-            if max_gap > 0.008:
-                cut_idx = elbow
+        MIN_RESULTS  = 8
+        MAX_RESULTS  = 25
+        GAP_THRESHOLD = 0.015   # meaningful drop for embedding-001
 
-        raw_deduped = sorted_camps[:max(cut_idx, 3)]  # always keep at least 3
+        cut_idx = min(len(scores), MAX_RESULTS)  # default: keep up to 25
+        if len(scores) > MIN_RESULTS:
+            # Only look for elbow after MIN_RESULTS position
+            for i in range(MIN_RESULTS, min(len(scores)-1, MAX_RESULTS)):
+                if scores[i] - scores[i+1] >= GAP_THRESHOLD:
+                    cut_idx = i + 1
+                    break
+
+        raw_deduped = sorted_camps[:cut_idx]
 
         if not raw_deduped:
             elapsed = time.time() - start
@@ -1869,6 +1891,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.consultation_done = False
         st.session_state.last_filters = None
+        st.session_state.suppress_form = True   # prevent form re-firing on rerun
         st.rerun()
 
     st.markdown("""
@@ -1878,6 +1901,16 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # DEBUG panel — remove after confirming fix
+    if st.session_state.get('_debug_last'):
+        with st.expander("🐛 Debug (remove before prod)", expanded=True):
+            d = st.session_state['_debug_last']
+            st.write(f"**activity:** `{d['filters'].get('activity')}`")
+            st.write(f"**activity_has_codes:** `{d['activity_has_codes']}`")
+            st.write(f"**fallback:** `{d['fallback']}`")
+            st.write(f"**camp_count from SQL:** `{d['camp_count']}`")
+            st.write(f"**top 5 from SQL:** {d['top5_camps']}")
+
 # ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -1885,9 +1918,11 @@ if "consultation_done" not in st.session_state:
     st.session_state.consultation_done = False
 if "last_filters" not in st.session_state:
     st.session_state.last_filters = None
+if "suppress_form" not in st.session_state:
+    st.session_state.suppress_form = False
 
 # ── Consultation form handler ─────────────────────────────────────────────────
-if submitted and contact_name and region_camp:
+if submitted and contact_name and region_camp and not st.session_state.get('suppress_form', False):
     style_text  = "" if overnight == "Either" else overnight.lower()
     budget_text = f"under {costs_camp} per week" if costs_camp else ""
     age_text    = f"for a {age_child}-year-old" if age_child else ""
@@ -1961,6 +1996,7 @@ if last_msg and last_msg["role"] == "user" and not st.session_state.consultation
                 st.session_state.consultation_done = True
 
 # ── Chat input ────────────────────────────────────────────────────────────────
+st.session_state.suppress_form = False  # user is engaging — re-allow form
 if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto for a 10-year-old'"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.consultation_done = False
