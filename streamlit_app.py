@@ -510,7 +510,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         where = f"({where}){named_camp_condition}"
     sql = f"""SELECT
             sc.cid, sc.camp_name, sc.province,
-            MIN(sc.region)                  AS region,
+            COALESCE(MIN(CASE WHEN sc.region != 'Virtual Program' THEN sc.region END), MIN(sc.region)) AS region,
             sc.camp_style, sc.listing_tier, sc.camp_url,
             MIN(sc.session_url)             AS session_url,
             MIN(sc.age_from)                AS age_min,
@@ -1102,45 +1102,48 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             "Try broadening your search — remove a filter or ask me to widen the location."
         ), elapsed, filters
 
-    # Score and rank all candidates
-    # Apply semantic scoring if embeddings are ready — otherwise neutral 0.5 scores
+    # Apply semantic scoring if activity was searched and embeddings exist
     activity_query = (filters.get('activity') or '').strip()
     if activity_query and embeddings_are_ready(_search_engine):
         raw_deduped = semantic_score_camps(
             raw_deduped, activity_query, config['GEMINI_API_KEY'], _search_engine
         )
+        # Semantic floor: drop camps that simply don't match the activity
+        # Cosine similarity for unrelated content typically falls below 0.65
+        # Genuine matches (e.g. hockey camp for "hockey") score 0.80+
+        SEMANTIC_FLOOR = 0.65
+        relevant = [c for c in raw_deduped if c.get('_semantic_score', 0) >= SEMANTIC_FLOOR]
+
+        # If nothing clears the floor, relax to top-N by semantic score
+        # and let the user know results are approximate
+        if not relevant:
+            raw_deduped.sort(key=lambda c: -c.get('_semantic_score', 0))
+            top_sem = raw_deduped[0].get('_semantic_score', 0) if raw_deduped else 0
+            if top_sem < 0.55:
+                # Nothing remotely relevant — ask clarifying question
+                elapsed = time.time() - start
+                loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+                from urllib.parse import quote_plus as _qp2
+                search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp2(activity_query + ' camps')}"
+                return (
+                    f"I couldn't find **{activity_query} camps** in {loc_hint} in our verified network.\n\n"
+                    f"Try searching our full directory:\n"
+                    f"🔍 [Search camps.ca for {activity_query} camps]({search_url})\n\n"
+                    f"💬 *Or tell me a different activity or location and I'll search again.*"
+                ), elapsed, filters
+            relevant = raw_deduped[:10]  # top 10 approximate matches
+        raw_deduped = relevant
     else:
         for c in raw_deduped:
-            c['_semantic_score'] = 0.5  # neutral — no activity searched or no embeddings yet
+            c['_semantic_score'] = 0.5  # no activity searched — neutral
 
     scored = score_and_rank(raw_deduped, filters, fallback)
     top_score = scored[0].get('_relevancy', 0) if scored else 0
 
-    # Rule 1: top score < 10% → ask clarifying question, show nothing
-    if top_score < 0.10:
-        elapsed = time.time() - start
-        loc_hint  = filters.get('region') or filters.get('province') or 'Canada'
-        act_hint  = f" for **{activity_searched}**" if activity_searched else ''
-        style_hint= f" {filters.get('style', '')}" if filters.get('style') else ''
-        gender_hint = " for girls" if filters.get('gender') == 'girls' else (" for boys" if filters.get('gender') == 'boys' else '')
-        clarify_q = call_gemini(
-            "You are a helpful camp consultant. Write ONE friendly question (max 15 words, ending with ?) "            "to help narrow down a camp search that returned no strong matches. No preamble.",
-            f"Search had no strong matches: activity={activity_searched}, "            f"location={loc_hint}, style={filters.get('style')}, gender={filters.get('gender')}, age={filters.get('age')}",
-            config['GEMINI_API_KEY'], max_tokens=40
-        )
-        if not clarify_q or '?' not in clarify_q:
-            clarify_q = f"Could you tell me more about what you're looking for{act_hint}{style_hint}{gender_hint}?"
-        return (
-            f"I want to make sure I find the best fit! {clarify_q.strip()}\n\n"
-            f"💬 *For example: location, age, budget, or a specific activity.*"
-        ), elapsed, filters
-
-    # Rule 2: drop camps scoring ≤ 15%
+    # Final relevancy floor — drop structurally weak matches
     deduped = [c for c in scored if c.get('_relevancy', 0) > 0.15]
-
-    # If filtering dropped everything, fall back to top results above 10%
     if not deduped:
-        deduped = [c for c in scored if c.get('_relevancy', 0) >= 0.10]
+        deduped = scored[:5]  # always show at least top 5
 
     # New-child acknowledgement prefix
     new_child_prefix = ""
