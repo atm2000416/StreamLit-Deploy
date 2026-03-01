@@ -652,6 +652,140 @@ def dedupe_camps(camps):
     return deduped
 
 
+
+def score_and_rank(camps, filters, fallback):
+    """
+    Score each camp by relevancy to the search filters, then sort:
+      primary   → relevancy score DESC (continuous, 0.0–1.0)
+      secondary → tier rank ASC (gold=1, silver=2, bronze=3)
+
+    Scoring weights (total possible = 1.0):
+      Activity match  : 0.35  (most critical — wrong activity = useless result)
+      Location match  : 0.25  (region exact > province > any)
+      Age match       : 0.20  (session age range covers searched age)
+      Style match     : 0.10  (day vs overnight)
+      Gender match    : 0.10  (when gender was explicitly searched)
+
+    When a filter wasn't searched, that weight is redistributed proportionally
+    so scores remain comparable across queries with different filter counts.
+
+    Optional signals (no specific activity searched):
+      - Tighter age range = higher score (more precise fit)
+      - Region match > province match
+    """
+    import re
+
+    TIER_RANK = {'gold': 1, 'silver': 2, 'bronze': 3}
+
+    # Weights
+    W = {'activity': 0.35, 'location': 0.25, 'age': 0.20, 'style': 0.10, 'gender': 0.10}
+
+    # Which filters were actually searched
+    searched_activity = (filters.get('activity') or '').lower().strip()
+    searched_age      = filters.get('age')
+    searched_style    = (filters.get('style') or '').lower().strip()
+    searched_gender   = (filters.get('gender') or '').lower().strip()
+    searched_region   = (filters.get('region') or '').lower().strip()
+    searched_province = (filters.get('province') or '').lower().strip()
+
+    # Determine active weights — filters not searched get weight=0,
+    # remaining weights are rescaled to sum to 1.0
+    active = {}
+    if searched_activity: active['activity'] = W['activity']
+    if searched_age:      active['age']      = W['age']
+    if searched_style:    active['style']    = W['style']
+    if searched_gender:   active['gender']   = W['gender']
+    if searched_region or searched_province:
+                          active['location'] = W['location']
+
+    total_w = sum(active.values()) or 1.0
+    norm    = {k: v / total_w for k, v in active.items()}
+
+    def score_camp(c):
+        s = 0.0
+
+        # ── Activity ────────────────────────────────────────────────────────
+        if 'activity' in norm:
+            activities = (c.get('activities') or '').lower()
+            programs   = (c.get('matching_programs') or '').lower()
+            act_words  = set(re.findall(r'\w+', searched_activity))
+            # Full match in activities label or matching_programs
+            if any(w in activities or w in programs for w in act_words if len(w) > 3):
+                s += norm['activity']
+            else:
+                s += 0  # no partial credit — wrong activity is wrong
+
+        # ── Location ────────────────────────────────────────────────────────
+        if 'location' in norm:
+            camp_region   = (c.get('region') or '').lower()
+            camp_province = (c.get('province') or '').lower()
+            if searched_region and searched_region in camp_region:
+                s += norm['location']           # exact region match
+            elif searched_province and searched_province in camp_province:
+                s += norm['location'] * 0.6     # province match only
+            elif fallback in ('province_only', 'no_match'):
+                s += norm['location'] * 0.2     # fallback — penalise but don't zero
+
+        # ── Age ─────────────────────────────────────────────────────────────
+        if 'age' in norm:
+            age_min = c.get('age_min')
+            age_max = c.get('age_max')
+            if age_min is not None and age_max is not None:
+                if age_min <= searched_age <= age_max:
+                    # Bonus for tighter age range (more targeted program)
+                    range_size = max(age_max - age_min, 1)
+                    tightness  = max(0.0, 1.0 - (range_size - 1) / 18)
+                    s += norm['age'] * (0.7 + 0.3 * tightness)
+                else:
+                    s += 0  # age out of range
+
+        # ── Style ───────────────────────────────────────────────────────────
+        if 'style' in norm:
+            camp_style = (c.get('camp_style') or '').lower()
+            if searched_style == camp_style:
+                s += norm['style']
+
+        # ── Gender ──────────────────────────────────────────────────────────
+        if 'gender' in norm:
+            camp_gender = c.get('gender')  # raw int: 2=girls, 3=boys, 1=coed
+            if searched_gender == 'girls' and camp_gender == 2:
+                s += norm['gender']
+            elif searched_gender == 'boys' and camp_gender == 3:
+                s += norm['gender']
+
+        # ── Optional signals (no specific filter searched) ──────────────────
+        # When no activity searched, reward location precision
+        if 'location' not in norm and (searched_region or searched_province):
+            camp_region   = (c.get('region') or '').lower()
+            camp_province = (c.get('province') or '').lower()
+            if searched_region and searched_region in camp_region:
+                s += 0.15
+            elif searched_province and searched_province in camp_province:
+                s += 0.08
+
+        # When no age searched, reward tighter age range (more focused program)
+        if 'age' not in norm:
+            age_min = c.get('age_min')
+            age_max = c.get('age_max')
+            if age_min is not None and age_max is not None:
+                range_size = max(age_max - age_min, 1)
+                tightness  = max(0.0, 1.0 - (range_size - 1) / 18)
+                s += 0.05 * tightness
+
+        return round(s, 4)
+
+    # Score all camps
+    for c in camps:
+        c['_relevancy'] = score_camp(c)
+
+    # Sort: relevancy DESC, tier ASC
+    camps.sort(key=lambda c: (
+        -c['_relevancy'],
+        TIER_RANK.get(c.get('listing_tier'), 4)
+    ))
+
+    return camps
+
 def build_camp_url(c):
     """Return session-level URL when exactly 1 session matched, else camp URL."""
     session_count = int(c.get('session_count') or 0)
@@ -771,8 +905,11 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
         blurb = blurbs.get(i, '')
         why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
 
+        relevancy = c.get('_relevancy', 0)
+        match_pct  = f"{int(relevancy * 100)}% match"
+
         block = (
-            f"* **[{name}]({url})**\n"
+            f"* **[{name}]({url})** `{match_pct}`\n"
             f"   * **Location:** {region_c}, {province_c}\n"
         )
         if why_line:
@@ -1002,9 +1139,8 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             "Try broadening your search — remove a filter or ask me to widen the location."
         ), elapsed, filters
 
-    gold  = [c for c in raw_deduped if c.get('listing_tier') == 'gold']
-    other = [c for c in raw_deduped if c.get('listing_tier') != 'gold']
-    deduped = gold + other[:max(0, 8 - len(gold))]  # all gold + up to 8 total
+    # Score and rank: relevancy DESC then tier ASC — no caps, every match shown
+    deduped = score_and_rank(raw_deduped, filters, fallback)
 
     # New-child acknowledgement prefix
     new_child_prefix = ""
