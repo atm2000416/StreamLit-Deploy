@@ -2018,3 +2018,7 @@ if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto 
                 err = f"❌ Something went wrong: {str(e)[:300]}"
                 st.error(err)
                 st.session_state.messages.append({"role": "assistant", "content": err})
+
+
+
+                
