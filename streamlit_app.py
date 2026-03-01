@@ -268,11 +268,11 @@ def cosine_similarity(a: list, b: list) -> float:
 
 
 def get_query_embedding(query: str, api_key: str) -> list | None:
-    """Embed a search query using Gemini text-embedding-004."""
+    """Embed a search query using Gemini embedding-001."""
     import requests as _req
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "text-embedding-004:embedContent"
+        "embedding-001:embedContent"
         f"?key={api_key}"
     )
     try:
@@ -280,7 +280,7 @@ def get_query_embedding(query: str, api_key: str) -> list | None:
             url,
             headers={"Content-Type": "application/json"},
             json={
-                "model": "models/text-embedding-004",
+                "model": "models/embedding-001",
                 "content": {"parts": [{"text": query}]},
                 "taskType": "RETRIEVAL_QUERY",   # query vs document distinction
             },
@@ -1557,13 +1557,13 @@ def _show_embedding_admin(config):
         import requests as _tr
         _test_url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"text-embedding-004:embedContent?key={config['GEMINI_API_KEY']}"
+            f"embedding-001:embedContent?key={config['GEMINI_API_KEY']}"
         )
         try:
             _tr_resp = _tr.post(
                 _test_url,
                 headers={"Content-Type": "application/json"},
-                json={"model": "models/text-embedding-004",
+                json={"model": "models/embedding-001",
                       "content": {"parts": [{"text": "test"}]},
                       "taskType": "RETRIEVAL_DOCUMENT"},
                 timeout=15
@@ -1597,7 +1597,7 @@ def _show_embedding_admin(config):
 
     EMBED_URL = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"text-embedding-004:embedContent?key={config['GEMINI_API_KEY']}"
+        f"embedding-001:embedContent?key={config['GEMINI_API_KEY']}"
     )
     CAMP_SQL = _tx("""
         SELECT cc.cid, cc.camp_name, cc.description, cc.camp_style,
@@ -1631,7 +1631,7 @@ def _show_embedding_admin(config):
             _test_fp   = _fingerprint(_camps[0])
             _test_resp = _r.post(EMBED_URL,
                                  headers={"Content-Type": "application/json"},
-                                 json={"model": "models/text-embedding-004",
+                                 json={"model": "models/embedding-001",
                                        "content": {"parts": [{"text": _test_fp}]},
                                        "taskType": "RETRIEVAL_DOCUMENT"},
                                  timeout=20)
@@ -1649,7 +1649,7 @@ def _show_embedding_admin(config):
                     _fp   = _fingerprint(_camp)
                     _resp = _r.post(EMBED_URL,
                                     headers={"Content-Type": "application/json"},
-                                    json={"model": "models/text-embedding-004",
+                                    json={"model": "models/embedding-001",
                                           "content": {"parts": [{"text": _fp}]},
                                           "taskType": "RETRIEVAL_DOCUMENT"},
                                     timeout=20)

@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, text
 # ── Config ────────────────────────────────────────────────────────────────────
 GEMINI_EMBED_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "text-embedding-004:embedContent"
+    "embedding-001:embedContent"
 )
 EMBED_DIM    = 768
 BATCH_DELAY  = 0.1   # seconds between API calls (stay within free tier rate limit)
@@ -54,12 +54,12 @@ def get_engine():
 
 # ── Embedding API ─────────────────────────────────────────────────────────────
 def embed_text(text_content: str, api_key: str) -> list[float]:
-    """Call Gemini text-embedding-004 and return 768-dim vector."""
+    """Call Gemini embedding-001 and return 768-dim vector."""
     resp = requests.post(
         f"{GEMINI_EMBED_URL}?key={api_key}",
         headers={"Content-Type": "application/json"},
         json={
-            "model": "models/text-embedding-004",
+            "model": "models/embedding-001",
             "content": {"parts": [{"text": text_content}]},
             "taskType": "RETRIEVAL_DOCUMENT",
         },
