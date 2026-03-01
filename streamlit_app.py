@@ -815,8 +815,11 @@ def generate_blurbs(deduped, user_text, api_key):
     system = (
         "You are a warm, knowledgeable Canadian camp consultant. "
         "For each numbered camp below, write exactly ONE sentence (max 25 words) explaining "
-        "why it fits the user's search. Draw from Programs text first, then Description. "
+        "what makes this camp a great fit. Draw from Programs text first, then Description. "
         "Be specific — mention the actual program name or a standout detail. "
+        "CRITICAL: Always stay positive. Never say what a camp does NOT offer. "
+        "Never use words like 'not', 'doesn't', 'no hockey', 'lacks', 'only', 'just'. "
+        "Focus on what the camp DOES have that makes it worth considering. "
         "No corporate language. Sound like a trusted friend.\n\n"
         "Reply with ONLY this format — one line per camp, nothing else:\n"
         "1: <blurb>\n2: <blurb>\n..."
@@ -910,11 +913,8 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
         blurb = blurbs.get(i, '')
         why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
 
-        relevancy = c.get('_relevancy', 0)
-        match_pct  = f"{int(relevancy * 100)}% match"
-
         block = (
-            f"* **[{name}]({url})** `{match_pct}`\n"
+            f"* **[{name}]({url})**\n"
             f"   * **Location:** {region_c}, {province_c}\n"
         )
         if why_line:
@@ -1123,26 +1123,23 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # Step 4: Deduplicate then enforce gold-first cap — gold always included
     raw_deduped = dedupe_camps(camps) if camps else []
 
-    # If fallback kicked in AND user searched a specific activity → wrong results
-    # Also catch cases where main query "succeeded" but scores are near-zero (bad match)
+    # ── Relevancy thresholds ────────────────────────────────────────────────
+    # Rule 1: top score < 10%  → ask a clarifying question, show nothing
+    # Rule 2: score ≤ 15%      → silently drop from results
+    # Rule 3: everything shown  → only camps scoring > 15%
     activity_searched = (filters.get('activity') or '').strip()
+    from urllib.parse import quote_plus as _qp
+
+    # Hard fallback guard — DB returned camps that don't match the activity
     is_activity_fallback = (
         activity_searched and
         fallback in ('no_activity_in_region', 'no_activity_in_province', 'province_only', 'no_match')
     )
-    # Score-based safety net: if ALL returned camps score < 0.15, results are irrelevant
-    if not is_activity_fallback and activity_searched and raw_deduped:
-        scored_preview = score_and_rank(list(raw_deduped), filters, fallback)
-        top_score = scored_preview[0].get('_relevancy', 0) if scored_preview else 0
-        if top_score < 0.15:
-            is_activity_fallback = True
-            raw_deduped = []  # force no-results path
 
     if not raw_deduped or is_activity_fallback:
         elapsed = time.time() - start
-        from urllib.parse import quote_plus as _qp
         loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-        if activity_searched and is_activity_fallback:
+        if activity_searched:
             search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp(activity_searched + ' camps')}"
             return (
                 f"I couldn't find **{activity_searched} camps** in {loc_hint} in our verified member network.\n\n"
@@ -1155,8 +1152,35 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             "Try broadening your search — remove a filter or ask me to widen the location."
         ), elapsed, filters
 
-    # Score and rank: relevancy DESC then tier ASC — no caps, every match shown
-    deduped = score_and_rank(raw_deduped, filters, fallback)
+    # Score and rank all candidates
+    scored = score_and_rank(raw_deduped, filters, fallback)
+    top_score = scored[0].get('_relevancy', 0) if scored else 0
+
+    # Rule 1: top score < 10% → ask clarifying question, show nothing
+    if top_score < 0.10:
+        elapsed = time.time() - start
+        loc_hint  = filters.get('region') or filters.get('province') or 'Canada'
+        act_hint  = f" for **{activity_searched}**" if activity_searched else ''
+        style_hint= f" {filters.get('style', '')}" if filters.get('style') else ''
+        gender_hint = " for girls" if filters.get('gender') == 'girls' else (" for boys" if filters.get('gender') == 'boys' else '')
+        clarify_q = call_gemini(
+            "You are a helpful camp consultant. Write ONE friendly question (max 15 words, ending with ?) "            "to help narrow down a camp search that returned no strong matches. No preamble.",
+            f"Search had no strong matches: activity={activity_searched}, "            f"location={loc_hint}, style={filters.get('style')}, gender={filters.get('gender')}, age={filters.get('age')}",
+            config['GEMINI_API_KEY'], max_tokens=40
+        )
+        if not clarify_q or '?' not in clarify_q:
+            clarify_q = f"Could you tell me more about what you're looking for{act_hint}{style_hint}{gender_hint}?"
+        return (
+            f"I want to make sure I find the best fit! {clarify_q.strip()}\n\n"
+            f"💬 *For example: location, age, budget, or a specific activity.*"
+        ), elapsed, filters
+
+    # Rule 2: drop camps scoring ≤ 15%
+    deduped = [c for c in scored if c.get('_relevancy', 0) > 0.15]
+
+    # If filtering dropped everything, fall back to top results above 10%
+    if not deduped:
+        deduped = [c for c in scored if c.get('_relevancy', 0) >= 0.10]
 
     # New-child acknowledgement prefix
     new_child_prefix = ""
