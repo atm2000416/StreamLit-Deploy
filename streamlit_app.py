@@ -1901,15 +1901,7 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # DEBUG panel — remove after confirming fix
-    if st.session_state.get('_debug_last'):
-        with st.expander("🐛 Debug (remove before prod)", expanded=True):
-            d = st.session_state['_debug_last']
-            st.write(f"**activity:** `{d['filters'].get('activity')}`")
-            st.write(f"**activity_has_codes:** `{d['activity_has_codes']}`")
-            st.write(f"**fallback:** `{d['fallback']}`")
-            st.write(f"**camp_count from SQL:** `{d['camp_count']}`")
-            st.write(f"**top 5 from SQL:** {d['top5_camps']}")
+
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -1996,6 +1988,18 @@ if last_msg and last_msg["role"] == "user" and not st.session_state.consultation
                 st.session_state.consultation_done = True
 
 # ── Chat input ────────────────────────────────────────────────────────────────
+# DEBUG — always visible in main area
+if st.session_state.get('_debug_last'):
+    d = st.session_state['_debug_last']
+    st.info(
+        f"🐛 **DEBUG** | "
+        f"activity=`{d['filters'].get('activity')}` | "
+        f"has_codes=`{d['activity_has_codes']}` | "
+        f"fallback=`{d['fallback']}` | "
+        f"sql_camps=`{d['camp_count']}` | "
+        f"top3={d['top5_camps'][:3]}"
+    )
+
 st.session_state.suppress_form = False  # user is engaging — re-allow form
 if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto for a 10-year-old'"):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -2018,7 +2022,3 @@ if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto 
                 err = f"❌ Something went wrong: {str(e)[:300]}"
                 st.error(err)
                 st.session_state.messages.append({"role": "assistant", "content": err})
-
-
-
-                
