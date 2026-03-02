@@ -3,7 +3,6 @@ Camp Discovery Chatbot - Production Version
 Business Logic: Client-Only Member Camps with Verified URLs
 Platform: Streamlit Cloud
 Databases: Aiven MySQL (campdb, camp_directory, common_update)
-Vector DB: Pinecone
 AI: Google Gemini 2.5 Flash Lite
 """
 
@@ -24,7 +23,6 @@ def get_config():
     try:
         return {
             "GEMINI_API_KEY": st.secrets["GEMINI_API_KEY"],
-            "PINECONE_API_KEY": st.secrets["PINECONE_API_KEY"],
             "DB_HOST": st.secrets["DB_HOST"],
             "DB_PORT": st.secrets.get("DB_PORT", "10536"),
             "DB_USER": st.secrets["DB_USER"],
@@ -32,15 +30,11 @@ def get_config():
             "DB_CAMPDB": st.secrets.get("DB_CAMPDB", "campdb"),
             "DB_CAMP_DIR": st.secrets.get("DB_CAMP_DIRECTORY", "camp_directory"),
             "DB_COMMON": st.secrets.get("DB_COMMON_UPDATE", "common_update"),
-            "INDEX_NAME": st.secrets.get("INDEX_NAME", "searching-doolie"),
-            "INDEX_HOST": st.secrets["INDEX_HOST"],
-            "NAMESPACE": st.secrets.get("NAMESPACE", "default"),
         }
     except Exception:
         return {k: os.getenv(k, "") for k in [
-            "GEMINI_API_KEY", "PINECONE_API_KEY", "DB_HOST", "DB_PORT", 
-            "DB_USER", "DB_PASS", "DB_CAMPDB", "DB_CAMP_DIR", "DB_COMMON",
-            "INDEX_NAME", "INDEX_HOST", "NAMESPACE"
+            "GEMINI_API_KEY", "DB_HOST", "DB_PORT",
+            "DB_USER", "DB_PASS", "DB_CAMPDB", "DB_CAMP_DIR", "DB_COMMON"
         ]}
 
 def get_db_uri(config, db_name):
@@ -408,9 +402,14 @@ Province must be one of: British Columbia, Alberta, Ontario, Quebec, Manitoba, S
 For cities, set region to the city name and infer the province.
 For dietary or special needs, put the need in activity field.
 Examples:
-- "etobicoke" → province: "Ontario", region: "Toronto"
-- "nepean" → province: "Ontario", region: "Ottawa Region"
-- "mississauga" → province: "Ontario", region: "Halton - Peel"
+- "etobicoke" → province: "Ontario", region: "Etobicoke"
+- "nepean" → province: "Ontario", region: "Ottawa"
+- "scarborough" → province: "Ontario", region: "Scarborough"
+- "north york" → province: "Ontario", region: "North York"
+- "brampton" → province: "Ontario", region: "Brampton"
+- "oakville" → province: "Ontario", region: "Oakville"
+- "burlington" → province: "Ontario", region: "Burlington"
+- "mississauga" → province: "Ontario", region: "Mississauga"
 - "debate camps" → activity: "debate"
 - "hockey" → activity: "hockey"
 - "cheer" or "cheerleading" → activity: "cheer"
@@ -463,8 +462,16 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         'vancouver': 'British Columbia', 'victoria': 'British Columbia',
         'calgary': 'Alberta', 'edmonton': 'Alberta',
         'winnipeg': 'Manitoba', 'ottawa': 'Ontario', 'toronto': 'Ontario',
-        'halifax': 'Nova Scotia', 'winnipeg': 'Manitoba',
+        'halifax': 'Nova Scotia',
         'saskatoon': 'Saskatchewan', 'regina': 'Saskatchewan',
+        # GTA / Halton-Peel cities — raw city name, not region grouping
+        'mississauga': 'Ontario', 'brampton': 'Ontario', 'oakville': 'Ontario',
+        'burlington': 'Ontario', 'milton': 'Ontario', 'caledon': 'Ontario',
+        'etobicoke': 'Ontario', 'scarborough': 'Ontario', 'north york': 'Ontario',
+        'markham': 'Ontario', 'vaughan': 'Ontario', 'richmond hill': 'Ontario',
+        'pickering': 'Ontario', 'ajax': 'Ontario', 'whitby': 'Ontario',
+        'oshawa': 'Ontario', 'barrie': 'Ontario', 'hamilton': 'Ontario',
+        'kitchener': 'Ontario', 'waterloo': 'Ontario', 'cambridge': 'Ontario',
     }
 
     province = filters.get('province')
@@ -1846,7 +1853,7 @@ st.markdown("""
 
 # ── Config & data ─────────────────────────────────────────────────────────────
 config = get_config()
-required = ["GEMINI_API_KEY", "PINECONE_API_KEY", "DB_HOST", "DB_USER", "DB_PASS", "INDEX_HOST"]
+required = ["GEMINI_API_KEY", "DB_HOST", "DB_USER", "DB_PASS"]
 missing = [k for k in required if not config.get(k)]
 if missing:
     st.error(f"⚠️ Missing configuration: {', '.join(missing)}")
