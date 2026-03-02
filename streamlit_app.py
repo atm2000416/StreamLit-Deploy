@@ -1227,6 +1227,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'activity_has_codes': _activity_has_codes,
         'camp_count': len(camps),
         'top5_camps': [c.get('camp_name') for c in camps[:5]],
+        'top5_specialty': [f"{c.get('camp_name')}:{c.get('activities','?')[:30]}" for c in camps[:5]],
     }
 
     # Step 4: Build context string for Gemini
@@ -1309,21 +1310,30 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     from urllib.parse import quote_plus as _qp
 
     # Hard fallback guard:
-    # If specialty codes were used in SQL but fallback fired, the camps returned
-    # are NOT specialty matches (they're from province/global fallback).
-    # In this case, fall through to semantic search as backup rather than showing
-    # irrelevant camps with _semantic_score=0.9 applied incorrectly.
+    # If specialty codes were used in SQL but fallback fired, the returned camps
+    # are NOT specialty matches — they're from the province/global fallback.
     is_activity_fallback = (
         activity_searched and
         fallback in ('no_activity_in_region', 'no_activity_in_province', 'province_only', 'no_match')
     )
 
-    # If specialty codes matched but SQL still fell back, clear the code flag
-    # so semantic search runs as backup
+    # If we had a specific activity code but SQL still fell back:
+    # → Don't show fallback camps as if they match (they don't)
+    # → Don't run semantic as backup for code-mapped activities (semantic can't
+    #   distinguish "cooking camps" from "traditional camps" reliably)
+    # → Show an honest "not found" with a search link instead
     if _activity_has_codes and is_activity_fallback:
-        _activity_has_codes = False
+        elapsed = time.time() - start
+        loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+        search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp(activity_searched + ' camps')}"
+        return (
+            f"I couldn't find **{activity_searched} camps** in {loc_hint} in our verified member network.\n\n"
+            f"This could mean no member camps currently offer this specific program.\n\n"
+            f"🔍 [Search the full camps.ca directory for {activity_searched} camps]({search_url})\n\n"
+            f"💬 *Want me to try a broader search — like cooking, arts, or outdoor camps in this area?*"
+        ), elapsed, filters
 
-    if not raw_deduped or (is_activity_fallback and not raw_deduped):
+    if not raw_deduped:
         elapsed = time.time() - start
         loc_hint = filters.get('region') or filters.get('province') or 'Canada'
         if activity_searched:
@@ -2179,7 +2189,8 @@ if st.session_state.get('_debug_last'):
         f"has_codes=`{d['activity_has_codes']}` | "
         f"fallback=`{d['fallback']}` | "
         f"sql_camps=`{d['camp_count']}` | "
-        f"top3={d['top5_camps'][:3]}"
+        f"top3={d['top5_camps'][:3]} | "
+        f"specialties={d.get('top5_specialty', [])[:3]}"
         f"{err_str}"
     )
 
