@@ -479,115 +479,114 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
 
     # Activity: specialty codes go back into SQL for known activities (exact match).
     # Unknown activities (no codes) → SQL returns all, semantic ranking applied after.
-    # Specialty codes verified against actual DB (sessions_clean.specialty / specialty2)
-    # Run: SELECT DISTINCT specialty, specialty_label, COUNT(*) FROM sessions_clean GROUP BY 1,2
+    # Specialty codes — fully verified against DB
+    # specialty_label source: sessions_clean.specialty / specialty2
+    # Unknown "Code-X" labels excluded until identified
     ACTIVITY_CODES_SQL = {
-        # Sports
-        'hockey':       [29, 188],
-        'skating':      [51],
-        'ice skating':  [51],
-        'sports':       [12, 54, 66, 63, 29],   # 188=generic Sports excluded
-        'soccer':       [54],
-        'basketball':   [11, 12],
-        'tennis':       [66],
-        'golf':         [26],
-        'volleyball':   [63],
-        'swimming':     [56],
-        'swim':         [56],
-        'sailing':      [49],
-        'canoe':        [41],
-        'canoeing':     [41],
-        'kayak':        [41],
-        'lacrosse':     [29, 188],
-        'baseball':     [188],
-        'rugby':        [188],
-        'gymnastics':   [27],
-        'martial arts': [36],
-        'archery':      [7],
-        'wakeboard':    [65],
-        'ski':          [52],
-        'skiing':       [52],
-        'snowboard':    [52],
-        # STEM
-        'stem':         [18, 67, 160, 180, 50, 159, 266, 332],
-        'science':      [50, 18, 268],
-        'technology':   [18, 180, 268],
-        'coding':       [18, 68, 159, 180, 266, 332],
-        'programming':  [18, 68, 159, 180, 266, 332],
-        'robotics':     [67, 160, 268],
-        'engineering':  [160, 50, 268],
-        'math':         [20, 129],
-        'mathematics':  [20, 129],
-        'ai':           [302, 18, 268],          # 302 = AI (verified)
-        'artificial intelligence': [302, 18],
-        'game design':  [68],
-        'minecraft':    [68, 18],
-        'lego':         [67, 160],
-        # Arts
-        'arts':         [9, 10, 69, 173, 178, 355],
-        'art':          [9, 10, 69, 173, 355],
-        'visual art':   [9, 10],
-        'music':        [37],
-        'dance':        [22],
-        'theatre':      [59, 172],
-        'theater':      [59, 172],
-        'drama':        [59, 172],
-        'performing arts': [59, 172, 37],
-        'animation':    [178],
-        'film':         [178, 69],
-        'photography':  [69],
-        'cooking':      [133],
-        'chef':         [133],
-        'culinary':     [133],
-        # Debate / Speech / Writing — verified codes
-        'debate':       [362, 97],               # 362=Writing covers Debate Camp sessions
-        'speech':       [362, 97],
-        'public speaking': [362, 97],
-        'writing':      [362],
+        # ── Sports ──────────────────────────────────────────────────────────
+        'hockey':           [29],           # 29=Hockey (verified, 12 camps)
+        'ice hockey':       [29],
+        'skating':          [29],           # closest verified; no pure skating code found
+        'ice skating':      [29],
+        'sports':           [54, 66, 63, 29, 56],  # exclude 188=generic Sports umbrella
+        'soccer':           [54],           # 54=Soccer (18 camps)
+        'tennis':           [66],           # 66=Tennis (29 camps)
+        'golf':             [26],           # 26=Golf (5 camps)
+        'volleyball':       [63],           # 63=Volleyball (10 camps)
+        'swimming':         [56],           # 56=Swimming (8 camps)
+        'swim':             [56],
+        'sailing':          [49],           # 49=Sailing (9 camps)
+        'tall ships':       [49],
+        'canoe':            [41],           # 41=Canoe (19 camps)
+        'canoeing':         [41],
+        'kayak':            [41],
+        'canoe tripping':   [41],
+        'equestrian':       [30],           # 30=Equestrian (9 camps)
+        'riding':           [30],
+        'horse':            [30],
+        'horseback':        [30],
+        'dance':            [22],           # 22=Dance (16 camps)
+        'chess':            [278],          # 278=Chess (6 camps)
+        # ── STEM ────────────────────────────────────────────────────────────
+        'stem':             [67, 160, 180, 18, 68, 159, 266, 268],
+        'science':          [268, 18, 50],  # 268=STEM, 50=Aerospace
+        'aerospace':        [50],           # 50=Aerospace (19 camps) — not generic Science
+        'space':            [50],
+        'aviation':         [50],
+        'technology':       [180, 18, 268],
+        'coding':           [18, 68, 180, 266, 159],  # verified coding codes
+        'programming':      [18, 68, 180, 266, 159],
+        'robotics':         [67, 160],      # 67=Robotics (23), 160=Engineering (10)
+        'engineering':      [160, 67],
+        'math':             [20, 129],      # 20=Academic/Math, 129=Math
+        'mathematics':      [20, 129],
+        'ai':               [302],          # 302=AI (verified, 6 camps)
+        'artificial intelligence': [302],
+        'machine learning': [302],
+        'game design':      [68],           # 68=Coding/Game Design
+        'minecraft':        [68, 18],
+        'lego':             [67, 160],
+        # ── Arts ────────────────────────────────────────────────────────────
+        'arts':             [9, 10, 69],    # 9=Arts (22), 10=Arts (7), 69=Arts (5)
+        'art':              [9, 10, 69],
+        'visual art':       [9, 10],
+        'music':            [37],           # 37=Music (8 camps)
+        'theatre':          [59],           # 59=Theatre (16 camps)
+        'theater':          [59],
+        'drama':            [59],
+        'performing arts':  [59, 37, 22],
+        'photography':      [69],
+        'cooking':          [133],          # 133=Cooking (11 camps)
+        'chef':             [133],
+        'culinary':         [133],
+        'fashion':          [71, 172],      # 71=Fashion (5), 172=Fashion (24)
+        'fashion design':   [71, 172],
+        'beauty':           [172],
+        # ── Debate / Speech / Writing ────────────────────────────────────────
+        'debate':           [362, 97],      # 362=Writing (Debate Camp uses this), 97=Academic
+        'speech':           [362, 97],
+        'public speaking':  [362, 97],
+        'writing':          [362],          # 362=Writing (6 camps)
         'creative writing': [362],
-        # Outdoor / Traditional
-        'outdoor':      [24, 41, 49, 58, 265],
-        'adventure':    [41, 181],
-        'traditional':  [24, 58, 181, 265],
-        'nature':       [24, 181],
-        'wilderness':   [24, 41, 181],
-        'canoe tripping': [41],
-        'hiking':       [24, 181],
-        'climbing':     [181],
-        # Academic / Language
-        'academic':     [20, 32, 97, 196, 314],
-        'tutoring':     [32, 97],
-        'french':       [314],
-        'language':     [314],
-        'esl':          [314],
-        'chess':        [278],
-        # Other
-        'equestrian':   [30],
-        'riding':       [30],
-        'horse':        [30],
-        'horseback':    [30],
-        'leadership':   [33, 79, 88],
-        'special needs': [252],
-        'autism':       [252],
-        'wellness':     [91],
-        'yoga':         [91],
-        'mindfulness':  [91],
-        'cheer':        [164],
-        'cheerleading': [164],
-        'cheering':     [164],
-        'fashion':      [71, 264],
-        'fashion design': [71, 264],
-        'beauty':       [172],
-        'sailing':      [49],
-        'tall ships':   [49],
+        # ── Outdoor / Traditional ────────────────────────────────────────────
+        'outdoor':          [24, 41, 49, 58, 265],
+        'adventure':        [41, 181],
+        'traditional':      [181, 24, 58, 265],  # 181=Traditional (30 camps) primary
+        'nature':           [24, 181],
+        'wilderness':       [24, 41, 181],
+        'hiking':           [24, 181],
+        # ── Academic / Language ──────────────────────────────────────────────
+        'academic':         [32, 97, 20, 314],   # 314=Academic (16 camps, verified)
+        'tutoring':         [32, 97],
+        'french':           [314],          # 314=Academic but covers French immersion
+        'language':         [314],
+        'esl':              [314],
+        # ── Leadership / Wellness ────────────────────────────────────────────
+        'leadership':       [88, 33, 79],   # 88=Leadership (30), 33=Leadership (9)
+        'wellness':         [91],           # 91=Wellness (11 camps)
+        'yoga':             [91],
+        'mindfulness':      [91],
+        # ── Cheer ────────────────────────────────────────────────────────────
+        'cheer':            [164],
+        'cheerleading':     [164],
+        'cheering':         [164],
+        # ── Special Needs ────────────────────────────────────────────────────
+        'special needs':    [252],          # 252=Special Needs (24 camps)
+        'autism':           [252],
+        'learning disability': [252],
     }
+    # Generic umbrella codes — too broad to mean a specific activity
     GENERIC_CODES_SQL = {188, 268, 9, 10, 79, 33}
+    # Location/region codes leaked into specialty column — exclude from all activity filters
+    LOCATION_CODES_SQL = {288, 150, 347, 170, 81, 256, 130, 11, 135, 176, 287, 315, 317,
+                          318, 342, 347}
     _activity_has_codes = False
 
     if activity:
         act_lower_sql = activity.lower().strip()
         sql_codes = ACTIVITY_CODES_SQL.get(act_lower_sql, [])
-        sql_codes = [c for c in sql_codes if c not in GENERIC_CODES_SQL] or sql_codes
+        sql_codes = [c for c in sql_codes
+                     if c not in GENERIC_CODES_SQL and c not in LOCATION_CODES_SQL] or sql_codes
         if sql_codes:
             code_list = ','.join(str(c) for c in sql_codes)
             conditions.append(f'(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))')
