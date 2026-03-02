@@ -15,6 +15,26 @@ from functools import lru_cache
 import time
 
 # ═════════════════════════════════════════════
+# TRACER — lightweight debug log (session-scoped)
+# Toggle via st.session_state['_tracer_on'] = True
+# View via the ⚙️ Admin expander → "Show Tracer Log"
+# ═════════════════════════════════════════════
+
+def _tracer_log(msg: str):
+    """Append a timestamped entry to the in-session tracer log."""
+    import streamlit as _st2
+    import time as _t2
+    if not _st2.session_state.get('_tracer_on', False):
+        return
+    log = _st2.session_state.setdefault('_tracer', [])
+    ts = _t2.strftime("%H:%M:%S")
+    log.append(f"[{ts}] {msg}")
+    # Cap at 200 entries to avoid ballooning session state
+    if len(log) > 200:
+        _st2.session_state['_tracer'] = log[-200:]
+
+
+# ═════════════════════════════════════════════
 # CONFIGURATION
 # ═════════════════════════════════════════════
 @st.cache_resource
@@ -165,61 +185,104 @@ def load_client_camps(config):
 # ═════════════════════════════════════════════
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Model fallback chain — tries each in order until one succeeds
-_GEMINI_MODELS = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-]
-_WORKING_MODEL: str | None = None   # cached after first successful call
+# Auto-discovered once per session from ListModels — no hardcoded names
+_GENERATE_MODEL_CACHE: str | None = None
+
+
+def _get_generate_model(api_key: str) -> str | None:
+    """
+    Discover the best available generateContent model for this API key.
+    Called once per session; result cached in _GENERATE_MODEL_CACHE.
+    Prefers 'flash' models; falls back to whatever generateContent supports.
+    """
+    global _GENERATE_MODEL_CACHE
+    if _GENERATE_MODEL_CACHE:
+        return _GENERATE_MODEL_CACHE
+    import requests as _req
+    _tracer_log("_get_generate_model: calling ListModels")
+    try:
+        resp = _req.get(f"{BASE}/models?key={api_key}", timeout=10)
+        if resp.ok:
+            all_models = resp.json().get("models", [])
+            gen_models = [
+                m["name"] for m in all_models
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+                and "embedding" not in m["name"].lower()
+                and "aqa" not in m["name"].lower()
+            ]
+            _tracer_log(f"_get_generate_model: found {len(gen_models)} candidates: {gen_models}")
+            if gen_models:
+                preferred = [m for m in gen_models if "flash" in m.lower()]
+                _GENERATE_MODEL_CACHE = (preferred or gen_models)[0]
+                _tracer_log(f"_get_generate_model: selected {_GENERATE_MODEL_CACHE}")
+                return _GENERATE_MODEL_CACHE
+            else:
+                _tracer_log("_get_generate_model: NO generateContent models found for this key")
+        else:
+            _tracer_log(f"_get_generate_model: ListModels failed HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        _tracer_log(f"_get_generate_model: exception {e}")
+    return None
 
 
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
-    """Call Gemini API with model fallback chain and error surfacing."""
+    """
+    Call Gemini generateContent API.
+    Model auto-discovered via ListModels — works regardless of API key tier.
+    Errors and tracer logs written to st.session_state for debug visibility.
+    """
     import requests
-    global _WORKING_MODEL
+    import streamlit as _st
+
+    model = _get_generate_model(api_key)
+    if not model:
+        msg = "call_gemini: no generateContent model available for this API key"
+        _tracer_log(msg)
+        _st.session_state['_gemini_error'] = msg
+        return ""
+
+    _tracer_log(f"call_gemini: using model={model} max_tokens={max_tokens}")
 
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens}
     }
-
-    # If we already found a working model, try it first
-    candidates = ([_WORKING_MODEL] + _GEMINI_MODELS) if _WORKING_MODEL else _GEMINI_MODELS
-
-    last_error = ""
-    for model in candidates:
-        if not model:
-            continue
-        try:
-            resp = requests.post(
-                f"{BASE}/models/{model}:generateContent",
-                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-                json=payload, timeout=30
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                # Handle safety blocks / empty candidates gracefully
-                candidates_list = data.get("candidates", [])
-                if candidates_list:
-                    parts = candidates_list[0].get("content", {}).get("parts", [])
-                    if parts:
-                        _WORKING_MODEL = model   # cache winner
-                        return parts[0].get("text", "").strip()
-                # Empty response (e.g. safety filter) — not a model error, stop trying
-                _WORKING_MODEL = model
-                return ""
+    try:
+        resp = requests.post(
+            f"{BASE}/{model}:generateContent",
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            json=payload, timeout=30
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            candidates_list = data.get("candidates", [])
+            if candidates_list:
+                finish = candidates_list[0].get("finishReason", "")
+                parts = candidates_list[0].get("content", {}).get("parts", [])
+                if parts:
+                    text = parts[0].get("text", "").strip()
+                    _tracer_log(f"call_gemini: OK — {len(text)} chars returned (finishReason={finish})")
+                    return text
+                else:
+                    _tracer_log(f"call_gemini: empty parts — finishReason={finish} (likely safety block)")
+                    return ""
             else:
-                last_error = f"{model} HTTP {resp.status_code}: {resp.text[:200]}"
-        except Exception as e:
-            last_error = f"{model}: {e}"
-
-    # All models failed — surface error for debugging
-    import streamlit as _st
-    _st.session_state['_gemini_error'] = last_error
-    return ""
+                _tracer_log(f"call_gemini: no candidates in response — full resp: {str(data)[:300]}")
+                return ""
+        else:
+            # Hard failure — clear cache so next call rediscovers
+            global _GENERATE_MODEL_CACHE
+            _GENERATE_MODEL_CACHE = None
+            msg = f"{model} HTTP {resp.status_code}: {resp.text[:300]}"
+            _tracer_log(f"call_gemini: FAILED — {msg}")
+            _st.session_state['_gemini_error'] = msg
+            return ""
+    except Exception as e:
+        msg = f"{model} exception: {e}"
+        _tracer_log(f"call_gemini: EXCEPTION — {msg}")
+        _st.session_state['_gemini_error'] = msg
+        return ""
 
 
 # ═════════════════════════════════════════════
@@ -461,7 +524,9 @@ Examples:
 - no gender mention → gender: null
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
+    _tracer_log(f"extract_filters: input='{user_text[:80]}'")
     result = call_gemini(system, user_text, api_key, max_tokens=200)
+    _tracer_log(f"extract_filters: raw result='{result[:120] if result else 'EMPTY'}'")
     import json, re
     try:
         # Strip markdown code fences if present
@@ -471,8 +536,10 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         prov = (parsed.get('province') or '').strip()
         if prov.lower() in ('canada', 'all', 'any', 'nationwide', 'national'):
             parsed['province'] = None
+        _tracer_log(f"extract_filters: parsed={parsed}")
         return parsed
-    except:
+    except Exception as _ef:
+        _tracer_log(f"extract_filters: JSON parse FAILED — raw='{result[:120]}' err={_ef}")
         return {}
 
 
@@ -817,6 +884,8 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         ORDER BY FIELD(sc.listing_tier, 'gold', 'silver', 'bronze'), sc.camp_name
         LIMIT {limit}"""
 
+    _tracer_log(f"search_camps: province={province} region={resolved_region} activity={activity} age={age} style={style}")
+    _tracer_log(f"search_camps: SQL conditions={conditions}")
     try:
         engine = create_engine(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
@@ -825,6 +894,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
             cols   = list(result.keys())
 
             if rows:
+                _tracer_log(f"search_camps: PRIMARY hit — {len(rows)} rows")
                 return [dict(zip(cols, row)) for row in rows], province, resolved_region, None, _activity_has_codes
 
             # Fallbacks 1 & 2 removed — activity is no longer a SQL filter.
@@ -1292,12 +1362,13 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # Build engine once — reused for embeddings and search
     from sqlalchemy import create_engine as _ce
     _search_engine = _ce(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
+    _tracer_log(f"process_query: final filters={filters}")
     camps, province, region, fallback, _activity_has_codes = search_camps(
         filters, config,
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
     )
-
+    _tracer_log(f"process_query: search returned {len(camps)} camps, fallback={fallback}, activity_has_codes={_activity_has_codes}")
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -1949,13 +2020,55 @@ def _show_embedding_admin(config):
                     m["name"] for m in _models
                     if "embedContent" in m.get("supportedGenerationMethods", [])
                 ]
+                # ── generateContent models ──────────────────────────────
+                _gen_models = [
+                    m["name"] for m in _models
+                    if "generateContent" in m.get("supportedGenerationMethods", [])
+                    and "embedding" not in m["name"].lower()
+                    and "aqa" not in m["name"].lower()
+                ]
+                st.markdown("**generateContent models (used for filter extraction & blurbs):**")
+                if _gen_models:
+                    st.success(f"Found {len(_gen_models)} model(s):")
+                    for _m in _gen_models:
+                        st.code(_m)
+                    # Live-test the first one with a real generateContent call
+                    _gen_best = _gen_models[0]
+                    st.write(f"Testing `{_gen_best}` with a real generateContent call...")
+                    _gen_test = _tr.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/{_gen_best}:generateContent",
+                        headers={"Content-Type": "application/json", "x-goog-api-key": _api_key},
+                        json={
+                            "contents": [{"role": "user", "parts": [{"text": "Reply with the single word: WORKING"}]}],
+                            "generationConfig": {"temperature": 0, "maxOutputTokens": 10}
+                        },
+                        timeout=15
+                    )
+                    if _gen_test.ok:
+                        _gen_data = _gen_test.json()
+                        _gen_parts = (_gen_data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+                        _gen_text = _gen_parts[0].get("text", "").strip() if _gen_parts else ""
+                        if _gen_text:
+                            st.success(f"✅ generateContent working — model replied: '{_gen_text}'")
+                        else:
+                            _finish = (_gen_data.get("candidates") or [{}])[0].get("finishReason", "unknown")
+                            st.warning(f"⚠️ generateContent returned empty text (finishReason={_finish}) — possible safety block on system prompt")
+                    else:
+                        st.error(f"❌ generateContent FAILED {_gen_test.status_code}: {_gen_test.text[:300]}")
+                else:
+                    st.error("❌ NO generateContent models available for this API key!")
+                    st.write("All available models:")
+                    for _m in _models[:15]:
+                        st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
+
+                # ── Embedding models ─────────────────────────────────────────
+                st.markdown("**Embedding models (used for semantic search):**")
                 if _embed_models:
                     st.success(f"Found {len(_embed_models)} embedding model(s):")
                     for _m in _embed_models:
                         st.code(_m)
                     # Auto-test the first available one
                     _best = _embed_models[0]
-                    _model_id = _best.split("/")[-1]  # e.g. "embedding-001"
                     st.write(f"Testing `{_best}`...")
                     _test_resp = _tr.post(
                         f"https://generativelanguage.googleapis.com/v1beta/{_best}:embedContent?key={_api_key}",
@@ -1967,15 +2080,11 @@ def _show_embedding_admin(config):
                     )
                     if _test_resp.ok:
                         _dims = len(_test_resp.json()["embedding"]["values"])
-                        st.success(f"✅ Working model found: `{_best}` — {_dims} dimensions")
-                        st.info(f"Update EMBED_MODEL in the code to: `{_best}`")
+                        st.success(f"✅ Embedding working: `{_best}` — {_dims} dimensions")
                     else:
                         st.error(f"Model listed but embedContent failed: {_test_resp.text[:300]}")
                 else:
                     st.error("No embedding models available for this API key")
-                    st.write("All models:")
-                    for _m in _models[:10]:
-                        st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
             else:
                 st.error(f"ListModels failed {_list_resp.status_code}: {_list_resp.text[:300]}")
         except Exception as _te:
@@ -2121,6 +2230,21 @@ with st.sidebar:
     # Admin: Embedding Management
     with st.expander("⚙️ Admin: Search Index", expanded=False):
         _show_embedding_admin(config)
+
+    with st.expander("🔬 Debug: Tracer Log", expanded=False):
+        _tracer_on = st.toggle("Enable tracer (logs next search)", value=st.session_state.get('_tracer_on', False))
+        st.session_state['_tracer_on'] = _tracer_on
+        if st.button("🗑️ Clear tracer log", use_container_width=True):
+            st.session_state['_tracer'] = []
+        _log = st.session_state.get('_tracer', [])
+        if _log:
+            st.code("\n".join(_log), language=None)
+        else:
+            st.caption("No tracer entries yet. Enable tracer, then run a search.")
+        # Also show last Gemini error if any
+        _gerr = st.session_state.get('_gemini_error', '')
+        if _gerr:
+            st.error(f"Last Gemini error: {_gerr}")
 
     with st.form("consultation_form"):
         st.markdown('<div class="sb-section">👤 About You</div>', unsafe_allow_html=True)
