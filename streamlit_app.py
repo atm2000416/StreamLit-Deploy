@@ -414,6 +414,10 @@ Examples:
 - "debate camps" → activity: "debate"
 - "hockey" → activity: "hockey"
 - "cheer" or "cheerleading" → activity: "cheer"
+- "ai camps" or "artificial intelligence" or "machine learning" → activity: "ai"
+- "robotics" → activity: "robotics"
+- "coding camps" or "programming" → activity: "coding"
+- "stem camps" or "steam camps" → activity: "stem"
 - "fashion" or "fashion design" → activity: "fashion"
 - "gluten free" → activity: "gluten"
 - "vegetarian" or "kosher" or "halal" → activity: "vegetarian" (dietary keyword)
@@ -671,8 +675,27 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                           318, 342, 347}
     _activity_has_codes = False
 
+    # Normalize activity aliases before lookup
+    _ACTIVITY_ALIASES = {
+        'artificial intelligence': 'ai', 'machine learning': 'ai',
+        'a.i.': 'ai', 'a.i': 'ai',
+        'computer science': 'coding', 'computer programming': 'coding',
+        'software': 'coding', 'app development': 'coding',
+        'horse riding': 'horseback riding', 'horseback': 'horseback riding',
+        'equestrian': 'equestrian',
+        'ball hockey': 'hockey', 'ice hockey': 'hockey',
+        'cheerleading': 'cheer', 'cheering': 'cheer',
+        'chef': 'cooking', 'culinary': 'cooking', 'baking': 'cooking',
+        'drama': 'theatre', 'theater': 'theatre', 'acting': 'theatre',
+        'stem': 'stem', 'steam': 'steam',
+        'maths': 'math', 'mathematics': 'math',
+        'swimming': 'swimming', 'swim': 'swimming',
+        'canoeing': 'canoeing', 'canoe': 'canoeing', 'kayaking': 'canoeing',
+        'debate': 'debate', 'public speaking': 'public speaking', 'speech': 'public speaking',
+    }
+
     if activity:
-        act_lower_sql = activity.lower().strip()
+        act_lower_sql = _ACTIVITY_ALIASES.get(activity.lower().strip(), activity.lower().strip())
         sql_codes = ACTIVITY_CODES_SQL.get(act_lower_sql, [])
         sql_codes = [c for c in sql_codes
                      if c not in GENERIC_CODES_SQL and c not in LOCATION_CODES_SQL] or sql_codes
