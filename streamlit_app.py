@@ -479,101 +479,171 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
 
     # Activity: specialty codes go back into SQL for known activities (exact match).
     # Unknown activities (no codes) → SQL returns all, semantic ranking applied after.
-    # Specialty codes — fully verified against DB
-    # specialty_label source: sessions_clean.specialty / specialty2
-    # Unknown "Code-X" labels excluded until identified
+    # ── Specialty code SQL filter ────────────────────────────────────────────
+    # PHILOSOPHY: Only use SQL specialty codes when the DB code is SPECIFIC
+    # enough to be meaningful. Broad umbrella codes (188, 268, 9) excluded.
+    #
+    # For taxonomy subcategories not listed here — financial literacy, pottery,
+    # entrepreneurship, filmmaking, martial arts, basketball, etc. — semantic
+    # search handles them. This is intentional and more accurate than forcing
+    # them into a coarse parent code.
+    #
+    # Codes verified against DB (sessions_clean.specialty/specialty2).
+    # Taxonomy source: camps.ca onboarding PDF (225 categories, 6 groups).
     ACTIVITY_CODES_SQL = {
-        # ── Sports ──────────────────────────────────────────────────────────
-        'hockey':           [29],           # 29=Hockey (verified, 12 camps)
-        'ice hockey':       [29],
-        'skating':          [29],           # closest verified; no pure skating code found
-        'ice skating':      [29],
-        'sports':           [54, 66, 63, 29, 56],  # exclude 188=generic Sports umbrella
-        'soccer':           [54],           # 54=Soccer (18 camps)
-        'tennis':           [66],           # 66=Tennis (29 camps)
-        'golf':             [26],           # 26=Golf (5 camps)
-        'volleyball':       [63],           # 63=Volleyball (10 camps)
-        'swimming':         [56],           # 56=Swimming (8 camps)
-        'swim':             [56],
-        'sailing':          [49],           # 49=Sailing (9 camps)
-        'tall ships':       [49],
-        'canoe':            [41],           # 41=Canoe (19 camps)
-        'canoeing':         [41],
-        'kayak':            [41],
-        'canoe tripping':   [41],
-        'equestrian':       [30],           # 30=Equestrian (9 camps)
-        'riding':           [30],
-        'horse':            [30],
-        'horseback':        [30],
-        'dance':            [22],           # 22=Dance (16 camps)
-        'chess':            [278],          # 278=Chess (6 camps)
-        # ── STEM ────────────────────────────────────────────────────────────
-        'stem':             [67, 160, 180, 18, 68, 159, 266, 268],
-        'science':          [268, 18, 50],  # 268=STEM, 50=Aerospace
-        'aerospace':        [50],           # 50=Aerospace (19 camps) — not generic Science
-        'space':            [50],
-        'aviation':         [50],
-        'technology':       [180, 18, 268],
-        'coding':           [18, 68, 180, 266, 159],  # verified coding codes
-        'programming':      [18, 68, 180, 266, 159],
-        'robotics':         [67, 160],      # 67=Robotics (23), 160=Engineering (10)
-        'engineering':      [160, 67],
-        'math':             [20, 129],      # 20=Academic/Math, 129=Math
-        'mathematics':      [20, 129],
-        'ai':               [302],          # 302=AI (verified, 6 camps)
+
+        # ── SPORTS ──────────────────────────────────────────────────────────
+        # Has dedicated codes; most Ball Sports subcategories fall to semantic
+        'hockey':               [29],
+        'ice hockey':           [29],
+        'ball hockey':          [29],
+        'figure skating':       [29],
+        'ice skating':          [29],
+        'soccer':               [54],
+        'tennis':               [66],
+        'golf':                 [26],
+        'disc golf':            [26],
+        'volleyball':           [63],
+        'beach volleyball':     [63],
+        'swimming':             [56],
+        'swim':                 [56],
+        'sailing':              [49],
+        'board sailing':        [49],
+        'marine skills':        [49],
+        'canoeing':             [41],
+        'canoe':                [41],
+        'kayaking':             [41],
+        'kayak':                [41],
+        'rowing':               [41],
+        'paddleboard':          [41],
+        'stand up paddle':      [41],
+        'waterskiing':          [41],
+        'wakeboarding':         [41],
+        'whitewater':           [41],
+        'equestrian':           [30],
+        'horseback riding':     [30],
+        'horseback':            [30],
+        'horse':                [30],
+        'riding':               [30],
+        'dance':                [22],
+        'ballet':               [22],
+        'hip hop':              [22],
+        'jazz dance':           [22],
+        'breakdancing':         [22],
+        'acro dance':           [22],
+        'tap dance':            [22],
+        'cheer':                [164],
+        'cheerleading':         [164],
+        'chess':                [278],
+        # Semantic handles: basketball, lacrosse, archery, gymnastics, martial arts,
+        # fencing, rock climbing, trampoline, cycling, parkour, ultimate frisbee,
+        # badminton, cricket, rugby, flag football, skateboarding, skiing, snowboarding,
+        # surfing, fishing, paintball, taekwondo, karate, ping pong, zip line, etc.
+
+        # ── COMPUTERS & TECH ────────────────────────────────────────────────
+        'coding':               [18, 68, 180, 266, 159],
+        'programming':          [18, 68, 180, 266, 159],
+        'python':               [18, 180],
+        'scratch':              [18, 180],
+        'java':                 [18, 180],
+        'robotics':             [67, 160],
+        'lego robotics':        [67],
+        'lego':                 [67],
+        'engineering':          [160, 67],
+        'ai':                   [302],
         'artificial intelligence': [302],
-        'machine learning': [302],
-        'game design':      [68],           # 68=Coding/Game Design
-        'minecraft':        [68, 18],
-        'lego':             [67, 160],
-        # ── Arts ────────────────────────────────────────────────────────────
-        'arts':             [9, 10, 69],    # 9=Arts (22), 10=Arts (7), 69=Arts (5)
-        'art':              [9, 10, 69],
-        'visual art':       [9, 10],
-        'music':            [37],           # 37=Music (8 camps)
-        'theatre':          [59],           # 59=Theatre (16 camps)
-        'theater':          [59],
-        'drama':            [59],
-        'performing arts':  [59, 37, 22],
-        'photography':      [69],
-        'cooking':          [133],          # 133=Cooking (11 camps)
-        'chef':             [133],
-        'culinary':         [133],
-        'fashion':          [71, 172],      # 71=Fashion (5), 172=Fashion (24)
-        'fashion design':   [71, 172],
-        'beauty':           [172],
-        # ── Debate / Speech / Writing ────────────────────────────────────────
-        'debate':           [362, 97],      # 362=Writing (Debate Camp uses this), 97=Academic
-        'speech':           [362, 97],
-        'public speaking':  [362, 97],
-        'writing':          [362],          # 362=Writing (6 camps)
-        'creative writing': [362],
-        # ── Outdoor / Traditional ────────────────────────────────────────────
-        'outdoor':          [24, 41, 49, 58, 265],
-        'adventure':        [41, 181],
-        'traditional':      [181, 24, 58, 265],  # 181=Traditional (30 camps) primary
-        'nature':           [24, 181],
-        'wilderness':       [24, 41, 181],
-        'hiking':           [24, 181],
-        # ── Academic / Language ──────────────────────────────────────────────
-        'academic':         [32, 97, 20, 314],   # 314=Academic (16 camps, verified)
-        'tutoring':         [32, 97],
-        'french':           [314],          # 314=Academic but covers French immersion
-        'language':         [314],
-        'esl':              [314],
-        # ── Leadership / Wellness ────────────────────────────────────────────
-        'leadership':       [88, 33, 79],   # 88=Leadership (30), 33=Leadership (9)
-        'wellness':         [91],           # 91=Wellness (11 camps)
-        'yoga':             [91],
-        'mindfulness':      [91],
-        # ── Cheer ────────────────────────────────────────────────────────────
-        'cheer':            [164],
-        'cheerleading':     [164],
-        'cheering':         [164],
-        # ── Special Needs ────────────────────────────────────────────────────
-        'special needs':    [252],          # 252=Special Needs (24 camps)
-        'autism':           [252],
-        'learning disability': [252],
+        'machine learning':     [302],
+        'minecraft':            [68, 18],
+        'roblox':               [68, 18],
+        'game design':          [68],
+        'video game design':    [68],
+        'video game':           [68],
+        'animation':            [180, 18],
+        'stem':                 [159, 268, 67, 160, 180, 18],
+        'steam':                [159, 268, 67, 160, 180, 18],
+        'math':                 [129, 20],
+        'mathematics':          [129, 20],
+        'aerospace':            [50],
+        'space':                [50],
+        'aviation':             [50],
+        'technology':           [180, 18],
+        # Semantic handles: 3D printing, drone, VR, web design, Arduino, Raspberry Pi,
+        # mechatronics, micro:bit, gaming (general)
+
+        # ── ARTS ────────────────────────────────────────────────────────────
+        'music':                [37],
+        'guitar':               [37],
+        'piano':                [37],
+        'drums':                [37],
+        'percussion':           [37],
+        'singing':              [37],
+        'vocal':                [37],
+        'songwriting':          [37],
+        'djing':                [37],
+        'theatre':              [59],
+        'theater':              [59],
+        'drama':                [59],
+        'musical theatre':      [59, 37],
+        'acting':               [59],
+        'performing arts':      [59, 37, 22],
+        'photography':          [69],
+        'filmmaking':           [69],
+        'videography':          [69],
+        'cooking':              [133],
+        'baking':               [133],
+        'culinary':             [133],
+        'chef':                 [133],
+        'fashion':              [71, 172],
+        'fashion design':       [71, 172],
+        'sewing':               [172],
+        'makeup':               [172],
+        # Semantic handles: pottery, ceramics, drawing, painting, circus, comedy,
+        # knitting, woodworking, magic, puppetry, storytelling, podcasting,
+        # YouTube/vlogging, sculpture, cartooning, comic art, mixed media
+
+        # ── EDUCATION ───────────────────────────────────────────────────────
+        'debate':               [362, 97],
+        'public speaking':      [362, 97],
+        'speech':               [362, 97],
+        'writing':              [362],
+        'creative writing':     [362],
+        'essay writing':        [362],
+        'academic':             [32, 97, 20, 314],
+        'tutoring':             [32, 97],
+        'french':               [314],
+        'french immersion':     [314],
+        'language':             [314],
+        'esl':                  [314],
+        # Semantic handles: financial literacy, entrepreneurship, journalism,
+        # makerspace, board games, reading, forensic science, marine biology,
+        # architecture, meteorology, zoology, test prep, urban exploration
+
+        # ── OUTDOOR / TRADITIONAL ────────────────────────────────────────────
+        'traditional':          [181, 24, 58, 265],
+        'wilderness':           [181, 24, 41],
+        'outdoor':              [181, 24, 41, 49, 58, 265],
+        'adventure':            [181, 41],
+        'nature':               [24, 181],
+        'hiking':               [24, 181],
+        'survival skills':      [24, 181],
+        'wilderness skills':    [24, 181],
+        'canoe tripping':       [41],
+
+        # ── LEADERSHIP / HEALTH / WELLNESS ──────────────────────────────────
+        'leadership':           [88, 33],
+        'wellness':             [91],
+        'yoga':                 [91],
+        'mindfulness':          [91],
+        'meditation':           [91],
+        'fitness':              [91],
+        # Semantic handles: nutrition, pilates, weight loss, first aid,
+        # strength & conditioning, behavioral therapy, bronze cross
+
+        # ── SPECIAL NEEDS ────────────────────────────────────────────────────
+        'special needs':        [252],
+        'autism':               [252],
+        'learning disability':  [252],
+        'behavioral therapy':   [252],
     }
     # Generic umbrella codes — too broad to mean a specific activity
     GENERIC_CODES_SQL = {188, 268, 9, 10, 79, 33}
