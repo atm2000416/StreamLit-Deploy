@@ -267,33 +267,49 @@ def cosine_similarity(a: list, b: list) -> float:
     return dot / (na * nb)
 
 
-def get_query_embedding(query: str, api_key: str) -> list | None:
-    """Embed a search query using Gemini embedding-001."""
+# Module-level cache for embedding model — discovered once per session
+_EMBED_MODEL_CACHE: str | None = None
+
+def _get_embed_model(api_key: str) -> str:
+    """Discover the working embedding model once and cache it for the session."""
+    global _EMBED_MODEL_CACHE
+    if _EMBED_MODEL_CACHE:
+        return _EMBED_MODEL_CACHE
     import requests as _req
-    # Discover available embedding model (cached implicitly via repeated calls)
     try:
         _list = _req.get(
             f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
             timeout=10
         )
-        _embed_models = [
-            m["name"] for m in (_list.json().get("models", []) if _list.ok else [])
-            if "embedContent" in m.get("supportedGenerationMethods", [])
-        ]
-        _model = _embed_models[0] if _embed_models else "models/embedding-001"
+        if _list.ok:
+            models = [
+                m["name"] for m in _list.json().get("models", [])
+                if "embedContent" in m.get("supportedGenerationMethods", [])
+            ]
+            if models:
+                _EMBED_MODEL_CACHE = models[0]
+                return _EMBED_MODEL_CACHE
     except Exception:
-        _model = "models/embedding-001"
+        pass
+    # Hardcode the known working model as fallback (full path required)
+    _EMBED_MODEL_CACHE = "models/embedding-001"
+    return _EMBED_MODEL_CACHE
 
+
+def get_query_embedding(query: str, api_key: str) -> list | None:
+    """Embed a search query. Model discovered once and cached for the session."""
+    import requests as _req
+    model = _get_embed_model(api_key)
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
-        f"{_model}:embedContent?key={api_key}"
+        f"{model}:embedContent?key={api_key}"
     )
     try:
         resp = _req.post(
             url,
             headers={"Content-Type": "application/json"},
             json={
-                "model": _model,
+                "model": model,
                 "content": {"parts": [{"text": query}]},
                 "taskType": "RETRIEVAL_QUERY",
             },
@@ -301,7 +317,10 @@ def get_query_embedding(query: str, api_key: str) -> list | None:
         )
         resp.raise_for_status()
         return resp.json()["embedding"]["values"]
-    except Exception:
+    except Exception as _e:
+        # Surface error in session state for debug visibility
+        import streamlit as _st
+        _st.session_state['_embed_error'] = f"{model}: {_e}"
         return None
 
 
@@ -2143,6 +2162,8 @@ if last_msg and last_msg["role"] == "user" and not st.session_state.consultation
 # DEBUG — always visible in main area
 if st.session_state.get('_debug_last'):
     d = st.session_state['_debug_last']
+    embed_err = st.session_state.get('_embed_error', '')
+    err_str = f" | ⚠️ embed_err=`{embed_err}`" if embed_err else ""
     st.info(
         f"🐛 **DEBUG** | "
         f"activity=`{d['filters'].get('activity')}` | "
@@ -2150,6 +2171,7 @@ if st.session_state.get('_debug_last'):
         f"fallback=`{d['fallback']}` | "
         f"sql_camps=`{d['camp_count']}` | "
         f"top3={d['top5_camps'][:3]}"
+        f"{err_str}"
     )
 
 st.session_state.suppress_form = False  # user is engaging — re-allow form
