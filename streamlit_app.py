@@ -1294,10 +1294,25 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         )
         return response, elapsed, filters
 
-    # If user asked for vegetarian cooking specifically → redirect to cooking search
+    # If user said "vegetarian cooking" → the real intent is cooking camps.
+    # Re-run search_camps with corrected activity so SQL specialty codes fire correctly.
     if matched_ambiguous and user_specified_cooking and not activity_is_cooking:
         filters['activity'] = 'cooking'
         activity_raw = 'cooking'
+        # Re-run search with corrected filters
+        camps, province, region, fallback, _activity_has_codes = search_camps(
+            filters, config,
+            named_camp=named_camp_override if 'named_camp_override' in locals() else None,
+            engine=_search_engine
+        )
+        import streamlit as _st2
+        _st2.session_state['_debug_last'] = {
+            'filters': filters, 'fallback': fallback,
+            'activity_has_codes': _activity_has_codes,
+            'camp_count': len(camps),
+            'top5_camps': [c.get('camp_name') for c in camps[:5]],
+            'top5_specialty': [f"{c.get('camp_name')}:{c.get('activities','?')[:30]}" for c in camps[:5]],
+        }
 
     # Step 4: Deduplicate then enforce gold-first cap — gold always included
     raw_deduped = dedupe_camps(camps) if camps else []
