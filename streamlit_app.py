@@ -678,7 +678,15 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                      if c not in GENERIC_CODES_SQL and c not in LOCATION_CODES_SQL] or sql_codes
         if sql_codes:
             code_list = ','.join(str(c) for c in sql_codes)
-            conditions.append(f'(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))')
+            # Primary-only match for highly specific activities where specialty2
+            # contamination is common (e.g. 302=AI appears as specialty2 on many STEM camps).
+            # For broader activities (sports, arts) OR-ing specialty2 is fine.
+            PRIMARY_ONLY_CODES = {302, 29, 30, 22, 278, 164, 133, 37, 59, 91, 252, 362}
+            if all(c in PRIMARY_ONLY_CODES for c in sql_codes):
+                # Only match on primary specialty — avoids specialty2 contamination
+                conditions.append(f'sc.specialty IN ({code_list})')
+            else:
+                conditions.append(f'(sc.specialty IN ({code_list}) OR sc.specialty2 IN ({code_list}))')
             _activity_has_codes = True
         else:
             # Unknown activity — no SQL filter, semantic ranking handles it post-query
@@ -1219,16 +1227,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
     )
-    # DEBUG — remove after confirming fix
-    import streamlit as _st
-    _st.session_state['_debug_last'] = {
-        'filters': filters,
-        'fallback': fallback,
-        'activity_has_codes': _activity_has_codes,
-        'camp_count': len(camps),
-        'top5_camps': [c.get('camp_name') for c in camps[:5]],
-        'top5_specialty': [f"{c.get('camp_name')}:{c.get('activities','?')[:30]}" for c in camps[:5]],
-    }
+
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -1305,14 +1304,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             named_camp=named_camp_override if 'named_camp_override' in locals() else None,
             engine=_search_engine
         )
-        import streamlit as _st2
-        _st2.session_state['_debug_last'] = {
-            'filters': filters, 'fallback': fallback,
-            'activity_has_codes': _activity_has_codes,
-            'camp_count': len(camps),
-            'top5_camps': [c.get('camp_name') for c in camps[:5]],
-            'top5_specialty': [f"{c.get('camp_name')}:{c.get('activities','?')[:30]}" for c in camps[:5]],
-        }
+
 
     # Step 4: Deduplicate then enforce gold-first cap — gold always included
     raw_deduped = dedupe_camps(camps) if camps else []
@@ -1332,21 +1324,15 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         fallback in ('no_activity_in_region', 'no_activity_in_province', 'province_only', 'no_match')
     )
 
-    # If we had a specific activity code but SQL still fell back:
-    # → Don't show fallback camps as if they match (they don't)
-    # → Don't run semantic as backup for code-mapped activities (semantic can't
-    #   distinguish "cooking camps" from "traditional camps" reliably)
-    # → Show an honest "not found" with a search link instead
+    # If we had a specific activity code but SQL fell back to province/global:
+    # The returned camps are NOT specialty matches.
+    # Strategy: run semantic search on the fallback camps instead of showing them as-is.
+    # Semantic will rank by relevance to the activity query, filtering noise via elbow detection.
+    # This handles "AI camps in Mississauga" where no AI camp is local but semantic
+    # can find the closest matches from the broader fallback pool.
     if _activity_has_codes and is_activity_fallback:
-        elapsed = time.time() - start
-        loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-        search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp(activity_searched + ' camps')}"
-        return (
-            f"I couldn't find **{activity_searched} camps** in {loc_hint} in our verified member network.\n\n"
-            f"This could mean no member camps currently offer this specific program.\n\n"
-            f"🔍 [Search the full camps.ca directory for {activity_searched} camps]({search_url})\n\n"
-            f"💬 *Want me to try a broader search — like cooking, arts, or outdoor camps in this area?*"
-        ), elapsed, filters
+        # Clear code flag so semantic path runs below
+        _activity_has_codes = False
 
     if not raw_deduped:
         elapsed = time.time() - start
@@ -2193,22 +2179,6 @@ if last_msg and last_msg["role"] == "user" and not st.session_state.consultation
                 st.session_state.consultation_done = True
 
 # ── Chat input ────────────────────────────────────────────────────────────────
-# DEBUG — always visible in main area
-if st.session_state.get('_debug_last'):
-    d = st.session_state['_debug_last']
-    embed_err = st.session_state.get('_embed_error', '')
-    err_str = f" | ⚠️ embed_err=`{embed_err}`" if embed_err else ""
-    st.info(
-        f"🐛 **DEBUG** | "
-        f"activity=`{d['filters'].get('activity')}` | "
-        f"has_codes=`{d['activity_has_codes']}` | "
-        f"fallback=`{d['fallback']}` | "
-        f"sql_camps=`{d['camp_count']}` | "
-        f"top3={d['top5_camps'][:3]} | "
-        f"specialties={d.get('top5_specialty', [])[:3]}"
-        f"{err_str}"
-    )
-
 st.session_state.suppress_form = False  # user is engaging — re-allow form
 if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto for a 10-year-old'"):
     st.session_state.messages.append({"role": "user", "content": prompt})
