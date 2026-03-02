@@ -169,7 +169,7 @@ def load_client_camps(config):
 # ═════════════════════════════════════════════
 # GEMINI API
 # ═════════════════════════════════════════════
-MODEL = "gemini-2.5-flash-lite"
+MODEL = "gemini-2.0-flash"
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
@@ -2224,4 +2224,3 @@ if prompt := st.chat_input("🔍  Search camps... e.g. 'hockey camps in Toronto 
                 err = f"❌ Something went wrong: {str(e)[:300]}"
                 st.error(err)
                 st.session_state.messages.append({"role": "assistant", "content": err})
-
