@@ -15,28 +15,20 @@ from functools import lru_cache
 import time
 
 # ═════════════════════════════════════════════
-# TRACER — lightweight debug log (session-scoped)
-# Toggle via st.session_state['_tracer_on'] = True
-# View via the ⚙️ Admin expander → "Show Tracer Log"
+# CONFIGURATION
 # ═════════════════════════════════════════════
 
 def _tracer_log(msg: str):
-    """Append a timestamped entry to the in-session tracer log."""
-    import streamlit as _st2
-    import time as _t2
+    """Append timestamped entry to in-session tracer log. No-op when tracer is off."""
+    import streamlit as _st2, time as _t2
     if not _st2.session_state.get('_tracer_on', False):
         return
     log = _st2.session_state.setdefault('_tracer', [])
-    ts = _t2.strftime("%H:%M:%S")
-    log.append(f"[{ts}] {msg}")
-    # Cap at 200 entries to avoid ballooning session state
+    log.append(f"[{_t2.strftime('%H:%M:%S')}] {msg}")
     if len(log) > 200:
         _st2.session_state['_tracer'] = log[-200:]
 
 
-# ═════════════════════════════════════════════
-# CONFIGURATION
-# ═════════════════════════════════════════════
 @st.cache_resource
 def get_config():
     """Load configuration from Streamlit secrets or environment variables"""
@@ -185,16 +177,12 @@ def load_client_camps(config):
 # ═════════════════════════════════════════════
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Auto-discovered once per session from ListModels — no hardcoded names
+# Auto-discovered once per session — no hardcoded model names
 _GENERATE_MODEL_CACHE: str | None = None
 
 
 def _get_generate_model(api_key: str) -> str | None:
-    """
-    Discover the best available generateContent model for this API key.
-    Called once per session; result cached in _GENERATE_MODEL_CACHE.
-    Prefers 'flash' models; falls back to whatever generateContent supports.
-    """
+    """Discover best available generateContent model via ListModels. Cached per session."""
     global _GENERATE_MODEL_CACHE
     if _GENERATE_MODEL_CACHE:
         return _GENERATE_MODEL_CACHE
@@ -209,40 +197,45 @@ def _get_generate_model(api_key: str) -> str | None:
                 if "generateContent" in m.get("supportedGenerationMethods", [])
                 and "embedding" not in m["name"].lower()
                 and "aqa" not in m["name"].lower()
+                and "tts" not in m["name"].lower()
+                and "image" not in m["name"].lower()
+                and "robotics" not in m["name"].lower()
+                and "computer-use" not in m["name"].lower()
+                and "research" not in m["name"].lower()
             ]
-            _tracer_log(f"_get_generate_model: found {len(gen_models)} candidates: {gen_models}")
+            _tracer_log(f"_get_generate_model: {len(gen_models)} candidates: {gen_models[:8]}")
             if gen_models:
-                preferred = [m for m in gen_models if "flash" in m.lower()]
-                _GENERATE_MODEL_CACHE = (preferred or gen_models)[0]
+                # Prefer gemini-2.x-flash, then gemini-flash-latest, then anything flash
+                def _rank(name):
+                    n = name.lower()
+                    if "gemini-2" in n and "flash" in n and "lite" not in n: return 0
+                    if "gemini-flash-latest" in n: return 1
+                    if "flash" in n and "lite" not in n: return 2
+                    if "flash" in n: return 3
+                    return 4
+                gen_models.sort(key=_rank)
+                _GENERATE_MODEL_CACHE = gen_models[0]
                 _tracer_log(f"_get_generate_model: selected {_GENERATE_MODEL_CACHE}")
                 return _GENERATE_MODEL_CACHE
-            else:
-                _tracer_log("_get_generate_model: NO generateContent models found for this key")
-        else:
-            _tracer_log(f"_get_generate_model: ListModels failed HTTP {resp.status_code}: {resp.text[:200]}")
+        _tracer_log(f"_get_generate_model: ListModels failed {resp.status_code}")
     except Exception as e:
         _tracer_log(f"_get_generate_model: exception {e}")
     return None
 
 
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
-    """
-    Call Gemini generateContent API.
-    Model auto-discovered via ListModels — works regardless of API key tier.
-    Errors and tracer logs written to st.session_state for debug visibility.
-    """
+    """Call Gemini generateContent — model auto-discovered from ListModels."""
     import requests
     import streamlit as _st
 
     model = _get_generate_model(api_key)
     if not model:
-        msg = "call_gemini: no generateContent model available for this API key"
-        _tracer_log(msg)
+        msg = "No generateContent model available for this API key"
+        _tracer_log(f"call_gemini: ABORT — {msg}")
         _st.session_state['_gemini_error'] = msg
         return ""
 
-    _tracer_log(f"call_gemini: using model={model} max_tokens={max_tokens}")
-
+    _tracer_log(f"call_gemini: model={model} max_tokens={max_tokens}")
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -256,31 +249,28 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
         )
         if resp.status_code == 200:
             data = resp.json()
-            candidates_list = data.get("candidates", [])
-            if candidates_list:
-                finish = candidates_list[0].get("finishReason", "")
-                parts = candidates_list[0].get("content", {}).get("parts", [])
+            cands = data.get("candidates", [])
+            if cands:
+                finish = cands[0].get("finishReason", "")
+                parts = cands[0].get("content", {}).get("parts", [])
                 if parts:
                     text = parts[0].get("text", "").strip()
-                    _tracer_log(f"call_gemini: OK — {len(text)} chars returned (finishReason={finish})")
+                    _tracer_log(f"call_gemini: OK {len(text)}chars finishReason={finish}")
                     return text
-                else:
-                    _tracer_log(f"call_gemini: empty parts — finishReason={finish} (likely safety block)")
-                    return ""
-            else:
-                _tracer_log(f"call_gemini: no candidates in response — full resp: {str(data)[:300]}")
+                _tracer_log(f"call_gemini: empty parts finishReason={finish}")
                 return ""
+            _tracer_log(f"call_gemini: no candidates — {str(data)[:200]}")
+            return ""
         else:
-            # Hard failure — clear cache so next call rediscovers
             global _GENERATE_MODEL_CACHE
-            _GENERATE_MODEL_CACHE = None
+            _GENERATE_MODEL_CACHE = None   # clear so next call rediscovers
             msg = f"{model} HTTP {resp.status_code}: {resp.text[:300]}"
-            _tracer_log(f"call_gemini: FAILED — {msg}")
+            _tracer_log(f"call_gemini: FAILED {msg}")
             _st.session_state['_gemini_error'] = msg
             return ""
     except Exception as e:
         msg = f"{model} exception: {e}"
-        _tracer_log(f"call_gemini: EXCEPTION — {msg}")
+        _tracer_log(f"call_gemini: EXCEPTION {msg}")
         _st.session_state['_gemini_error'] = msg
         return ""
 
@@ -331,7 +321,7 @@ def _validate_filters(filters, user_text):
         validated['style'] = None
 
     # Age: must have a number or age word
-    if filters.get('age') and not re.search(r'\d+\s*(?:yr|year|yrs)|teen|toddler', text):
+    if filters.get('age') and not re.search(r'\d+[-\s]*(?:yr|year|yrs|-year)|teen|toddler|\d+\s*yo\b', text):
         validated['age'] = None
 
     return validated
@@ -524,22 +514,20 @@ Examples:
 - no gender mention → gender: null
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
-    _tracer_log(f"extract_filters: input='{user_text[:80]}'")
+    _tracer_log(f"extract_filters: '{user_text[:80]}'")
     result = call_gemini(system, user_text, api_key, max_tokens=200)
-    _tracer_log(f"extract_filters: raw result='{result[:120] if result else 'EMPTY'}'")
+    _tracer_log(f"extract_filters: raw='{result[:120] if result else 'EMPTY'}'")
     import json, re
     try:
-        # Strip markdown code fences if present
         clean = re.sub(r'```json|```', '', result).strip()
         parsed = json.loads(clean)
-        # Strip non-province values — 'Canada' etc. are not DB provinces
         prov = (parsed.get('province') or '').strip()
         if prov.lower() in ('canada', 'all', 'any', 'nationwide', 'national'):
             parsed['province'] = None
         _tracer_log(f"extract_filters: parsed={parsed}")
         return parsed
     except Exception as _ef:
-        _tracer_log(f"extract_filters: JSON parse FAILED — raw='{result[:120]}' err={_ef}")
+        _tracer_log(f"extract_filters: parse FAILED raw='{result[:120]}' err={_ef}")
         return {}
 
 
@@ -885,7 +873,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         LIMIT {limit}"""
 
     _tracer_log(f"search_camps: province={province} region={resolved_region} activity={activity} age={age} style={style}")
-    _tracer_log(f"search_camps: SQL conditions={conditions}")
+    _tracer_log(f"search_camps: conditions={conditions}")
     try:
         engine = create_engine(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
         with engine.connect() as conn:
@@ -894,7 +882,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
             cols   = list(result.keys())
 
             if rows:
-                _tracer_log(f"search_camps: PRIMARY hit — {len(rows)} rows")
+                _tracer_log(f"search_camps: PRIMARY {len(rows)} rows")
                 return [dict(zip(cols, row)) for row in rows], province, resolved_region, None, _activity_has_codes
 
             # Fallbacks 1 & 2 removed — activity is no longer a SQL filter.
@@ -1080,32 +1068,30 @@ def build_camp_url(c):
 
 def generate_blurbs(deduped, user_text, api_key):
     """Single Gemini call: given N camps, return N one-sentence Why-it-fits blurbs."""
+    # Cap at 15 camps to stay within token budget for any model
+    blurb_camps = deduped[:15]
     camp_snippets = []
-    for i, c in enumerate(deduped, 1):
+    for i, c in enumerate(blurb_camps, 1):
         name     = c.get('camp_name', '')
         programs = (c.get('matching_programs') or '').strip()
-        desc     = (c.get('description') or '')[:120]
+        desc     = (c.get('description') or '')[:100]
         camp_snippets.append(
             f"CAMP {i}: {name}\n"
-            f"Programs: {programs[:300] if programs else 'N/A'}\n"
-            f"Description: {desc}"
+            f"Programs: {programs[:200] if programs else 'N/A'}\n"
+            f"Desc: {desc}"
         )
 
     system = (
-        "You are a warm, knowledgeable Canadian camp consultant. "
-        "For each numbered camp below, write exactly ONE sentence (max 25 words) explaining "
-        "what makes this camp a great fit. Draw from Programs text first, then Description. "
-        "Be specific — mention the actual program name or a standout detail. "
-        "CRITICAL: Always stay positive. Never say what a camp does NOT offer. "
-        "Never use words like 'not', 'doesn't', 'no hockey', 'lacks', 'only', 'just'. "
-        "Focus on what the camp DOES have that makes it worth considering. "
-        "No corporate language. Sound like a trusted friend.\n\n"
-        "Reply with ONLY this format — one line per camp, nothing else:\n"
+        "You are a Canadian camp consultant. "
+        "For each numbered camp write ONE sentence (max 20 words) on why it fits. "
+        "Be specific — name the program or a standout detail. Stay positive. "
+        "Reply ONLY in this format, one line per camp:\n"
         "1: <blurb>\n2: <blurb>\n..."
     )
-    user_prompt = f"User searched for: {user_text}\n\n" + "\n\n".join(camp_snippets)
+    user_prompt = f"Search: {user_text}\n\n" + "\n\n".join(camp_snippets)
+    _tracer_log(f"generate_blurbs: {len(blurb_camps)} camps, prompt ~{len(user_prompt)} chars")
 
-    raw = call_gemini(system, user_prompt, api_key, max_tokens=1500)
+    raw = call_gemini(system, user_prompt, api_key, max_tokens=3000)
 
     # Parse "1: blurb" lines into a dict
     blurbs = {}
@@ -1239,6 +1225,15 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     if is_hard_reset:
         last_filters = None   # wipe context so decision tree treats this as fresh
 
+    # Hard-reset phrases — wipe last_filters so decision tree treats as fresh
+    fresh_search_phrases = [
+        'new search', 'start over', 'start fresh', 'reset', 'forget everything',
+        'different search', 'never mind', 'nevermind', 'scratch that',
+    ]
+    if any(p in text_lower_check for p in fresh_search_phrases):
+        _tracer_log("process_query: hard reset detected — clearing last_filters")
+        last_filters = None
+
     # Pure single-word affirmatives — no new info, reuse filters wholesale
     affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
     is_affirmative = text_lower_check.rstrip('!.') in affirmatives
@@ -1362,13 +1357,13 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # Build engine once — reused for embeddings and search
     from sqlalchemy import create_engine as _ce
     _search_engine = _ce(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
-    _tracer_log(f"process_query: final filters={filters}")
+    _tracer_log(f"process_query: filters={filters}")
     camps, province, region, fallback, _activity_has_codes = search_camps(
         filters, config,
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
     )
-    _tracer_log(f"process_query: search returned {len(camps)} camps, fallback={fallback}, activity_has_codes={_activity_has_codes}")
+    _tracer_log(f"process_query: {len(camps)} camps, fallback={fallback}, codes={_activity_has_codes}")
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -1472,7 +1467,10 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # This handles "AI camps in Mississauga" where no AI camp is local but semantic
     # can find the closest matches from the broader fallback pool.
     if _activity_has_codes and is_activity_fallback:
-        # Clear code flag so semantic path runs below
+        # Fallback fired despite specialty codes — camps returned are NOT
+        # specialty matches (they're province/global pool). Clear code flag
+        # so semantic ranking runs below instead of assigning score=0.9.
+        _tracer_log(f"process_query: activity fallback detected (fallback={fallback}), clearing code match flag → semantic will rank")
         _activity_has_codes = False
 
     if not raw_deduped:
@@ -1973,6 +1971,10 @@ if missing:
 with st.spinner("Loading member camps..."):
     client_camps = load_client_camps(config)
 
+# Surface Gemini errors prominently if all models failed
+if st.session_state.get('_gemini_error'):
+    st.warning(f"⚠️ Gemini API error: `{st.session_state['_gemini_error']}`")
+
 # ── Gemini API error surface (shown when all models fail) ─────────────────────
 if st.session_state.get('_gemini_error'):
     st.warning(f"⚠️ Gemini API error (all models failed): `{st.session_state['_gemini_error']}`")
@@ -2020,69 +2022,65 @@ def _show_embedding_admin(config):
                     m["name"] for m in _models
                     if "embedContent" in m.get("supportedGenerationMethods", [])
                 ]
-                # ── generateContent models ──────────────────────────────
+                # ── generateContent models ───────────────────────────
                 _gen_models = [
                     m["name"] for m in _models
                     if "generateContent" in m.get("supportedGenerationMethods", [])
                     and "embedding" not in m["name"].lower()
                     and "aqa" not in m["name"].lower()
+                    and "tts" not in m["name"].lower()
+                    and "image" not in m["name"].lower()
+                    and "robotics" not in m["name"].lower()
+                    and "computer-use" not in m["name"].lower()
+                    and "research" not in m["name"].lower()
                 ]
-                st.markdown("**generateContent models (used for filter extraction & blurbs):**")
+                st.markdown("**🤖 generateContent models (filter extraction + blurbs):**")
                 if _gen_models:
-                    st.success(f"Found {len(_gen_models)} model(s):")
                     for _m in _gen_models:
                         st.code(_m)
-                    # Live-test the first one with a real generateContent call
                     _gen_best = _gen_models[0]
-                    st.write(f"Testing `{_gen_best}` with a real generateContent call...")
+                    st.write(f"Live-testing `{_gen_best}`...")
                     _gen_test = _tr.post(
                         f"https://generativelanguage.googleapis.com/v1beta/{_gen_best}:generateContent",
                         headers={"Content-Type": "application/json", "x-goog-api-key": _api_key},
                         json={
                             "contents": [{"role": "user", "parts": [{"text": "Reply with the single word: WORKING"}]}],
-                            "generationConfig": {"temperature": 0, "maxOutputTokens": 10}
+                            "generationConfig": {"temperature": 0, "maxOutputTokens": 20}
                         },
                         timeout=15
                     )
                     if _gen_test.ok:
-                        _gen_data = _gen_test.json()
-                        _gen_parts = (_gen_data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-                        _gen_text = _gen_parts[0].get("text", "").strip() if _gen_parts else ""
-                        if _gen_text:
-                            st.success(f"✅ generateContent working — model replied: '{_gen_text}'")
+                        _gd = _gen_test.json()
+                        _gp = (_gd.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+                        _gt = _gp[0].get("text", "").strip() if _gp else ""
+                        _gf = (_gd.get("candidates") or [{}])[0].get("finishReason", "?")
+                        if _gt:
+                            st.success(f"✅ generateContent working — replied: '{_gt}'")
                         else:
-                            _finish = (_gen_data.get("candidates") or [{}])[0].get("finishReason", "unknown")
-                            st.warning(f"⚠️ generateContent returned empty text (finishReason={_finish}) — possible safety block on system prompt")
+                            st.warning(f"⚠️ Empty reply (finishReason={_gf}) — safety block or quota issue")
                     else:
                         st.error(f"❌ generateContent FAILED {_gen_test.status_code}: {_gen_test.text[:300]}")
                 else:
-                    st.error("❌ NO generateContent models available for this API key!")
-                    st.write("All available models:")
-                    for _m in _models[:15]:
-                        st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
+                    st.error("❌ NO generateContent models for this API key!")
 
-                # ── Embedding models ─────────────────────────────────────────
-                st.markdown("**Embedding models (used for semantic search):**")
+                # ── Embedding models ─────────────────────────────────
+                st.markdown("**🔢 Embedding models (semantic search):**")
                 if _embed_models:
-                    st.success(f"Found {len(_embed_models)} embedding model(s):")
                     for _m in _embed_models:
                         st.code(_m)
-                    # Auto-test the first available one
                     _best = _embed_models[0]
-                    st.write(f"Testing `{_best}`...")
                     _test_resp = _tr.post(
                         f"https://generativelanguage.googleapis.com/v1beta/{_best}:embedContent?key={_api_key}",
                         headers={"Content-Type": "application/json"},
-                        json={"model": _best,
-                              "content": {"parts": [{"text": "test"}]},
+                        json={"model": _best, "content": {"parts": [{"text": "test"}]},
                               "taskType": "RETRIEVAL_DOCUMENT"},
                         timeout=15
                     )
                     if _test_resp.ok:
                         _dims = len(_test_resp.json()["embedding"]["values"])
-                        st.success(f"✅ Embedding working: `{_best}` — {_dims} dimensions")
+                        st.success(f"✅ Embedding working: `{_best}` — {_dims} dims")
                     else:
-                        st.error(f"Model listed but embedContent failed: {_test_resp.text[:300]}")
+                        st.error(f"embedContent failed: {_test_resp.text[:300]}")
                 else:
                     st.error("No embedding models available for this API key")
             else:
@@ -2232,7 +2230,8 @@ with st.sidebar:
         _show_embedding_admin(config)
 
     with st.expander("🔬 Debug: Tracer Log", expanded=False):
-        _tracer_on = st.toggle("Enable tracer (logs next search)", value=st.session_state.get('_tracer_on', False))
+        _tracer_on = st.toggle("Enable tracer (logs next search)",
+                               value=st.session_state.get('_tracer_on', False))
         st.session_state['_tracer_on'] = _tracer_on
         if st.button("🗑️ Clear tracer log", use_container_width=True):
             st.session_state['_tracer'] = []
@@ -2240,8 +2239,7 @@ with st.sidebar:
         if _log:
             st.code("\n".join(_log), language=None)
         else:
-            st.caption("No tracer entries yet. Enable tracer, then run a search.")
-        # Also show last Gemini error if any
+            st.caption("No entries yet. Enable tracer then run a search.")
         _gerr = st.session_state.get('_gemini_error', '')
         if _gerr:
             st.error(f"Last Gemini error: {_gerr}")
