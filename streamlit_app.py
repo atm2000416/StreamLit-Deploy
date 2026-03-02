@@ -163,32 +163,62 @@ def load_client_camps(config):
 # ═════════════════════════════════════════════
 # GEMINI API
 # ═════════════════════════════════════════════
-MODEL = "gemini-2.0-flash"
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
+# Model fallback chain — tries each in order until one succeeds
+_GEMINI_MODELS = [
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+]
+_WORKING_MODEL: str | None = None   # cached after first successful call
+
+
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
-    """Call Gemini API with error handling"""
+    """Call Gemini API with model fallback chain and error surfacing."""
     import requests
+    global _WORKING_MODEL
+
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens}
     }
-    try:
-        resp = requests.post(
-            f"{BASE}/models/{MODEL}:generateContent",
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-            json=payload, timeout=30
-        )
-        if resp.status_code >= 400:
-            return ""
-        data = resp.json()
-        if data.get("candidates"):
-            parts = data["candidates"][0].get("content", {}).get("parts", [])
-            if parts:
-                return parts[0].get("text", "").strip()
-    except Exception:
-        pass
+
+    # If we already found a working model, try it first
+    candidates = ([_WORKING_MODEL] + _GEMINI_MODELS) if _WORKING_MODEL else _GEMINI_MODELS
+
+    last_error = ""
+    for model in candidates:
+        if not model:
+            continue
+        try:
+            resp = requests.post(
+                f"{BASE}/models/{model}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                json=payload, timeout=30
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Handle safety blocks / empty candidates gracefully
+                candidates_list = data.get("candidates", [])
+                if candidates_list:
+                    parts = candidates_list[0].get("content", {}).get("parts", [])
+                    if parts:
+                        _WORKING_MODEL = model   # cache winner
+                        return parts[0].get("text", "").strip()
+                # Empty response (e.g. safety filter) — not a model error, stop trying
+                _WORKING_MODEL = model
+                return ""
+            else:
+                last_error = f"{model} HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            last_error = f"{model}: {e}"
+
+    # All models failed — surface error for debugging
+    import streamlit as _st
+    _st.session_state['_gemini_error'] = last_error
     return ""
 
 
@@ -223,7 +253,7 @@ def _validate_filters(filters, user_text):
     if activity:
         activity_words = set(re.findall(r'\w+', activity))
         is_negated = bool(activity_words & negated_words)
-        if is_negated or not any(w in text for w in activity_words if len(w) > 3):
+        if is_negated or not any(w in text for w in activity_words if len(w) > 1):
             validated['activity'] = None
 
     # Gender: must have an explicit gender word
@@ -1129,6 +1159,16 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     last_meaningful_line = last_lines[-1] if last_lines else ''
     ai_asked_question = last_meaningful_line.endswith('?')
 
+    # Hard-reset phrases — user explicitly wants a completely new search
+    # Detected BEFORE anything else; bypasses all filter inheritance
+    fresh_search_phrases = [
+        'new search', 'start over', 'start fresh', 'reset', 'forget everything',
+        'different search', 'never mind', 'nevermind', 'scratch that',
+    ]
+    is_hard_reset = any(p in text_lower_check for p in fresh_search_phrases)
+    if is_hard_reset:
+        last_filters = None   # wipe context so decision tree treats this as fresh
+
     # Pure single-word affirmatives — no new info, reuse filters wholesale
     affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
     is_affirmative = text_lower_check.rstrip('!.') in affirmatives
@@ -1861,6 +1901,10 @@ if missing:
 
 with st.spinner("Loading member camps..."):
     client_camps = load_client_camps(config)
+
+# ── Gemini API error surface (shown when all models fail) ─────────────────────
+if st.session_state.get('_gemini_error'):
+    st.warning(f"⚠️ Gemini API error (all models failed): `{st.session_state['_gemini_error']}`")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
