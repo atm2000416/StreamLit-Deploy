@@ -1137,13 +1137,22 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     activity_searched = (filters.get('activity') or '').strip()
     from urllib.parse import quote_plus as _qp
 
-    # Hard fallback guard — DB returned camps that don't match the activity
+    # Hard fallback guard:
+    # If specialty codes were used in SQL but fallback fired, the camps returned
+    # are NOT specialty matches (they're from province/global fallback).
+    # In this case, fall through to semantic search as backup rather than showing
+    # irrelevant camps with _semantic_score=0.9 applied incorrectly.
     is_activity_fallback = (
         activity_searched and
         fallback in ('no_activity_in_region', 'no_activity_in_province', 'province_only', 'no_match')
     )
 
-    if not raw_deduped or is_activity_fallback:
+    # If specialty codes matched but SQL still fell back, clear the code flag
+    # so semantic search runs as backup
+    if _activity_has_codes and is_activity_fallback:
+        _activity_has_codes = False
+
+    if not raw_deduped or (is_activity_fallback and not raw_deduped):
         elapsed = time.time() - start
         loc_hint = filters.get('region') or filters.get('province') or 'Canada'
         if activity_searched:
@@ -1779,7 +1788,7 @@ def _show_embedding_admin(config):
         JOIN camp_directory.sessions_clean sc
             ON sc.cid=cc.cid AND sc.province=cc.province
         LEFT JOIN camp_directory.sessions s ON s.id=sc.session_id
-        WHERE cc.status=1 AND sc.status=1 AND sc.is_virtual=0
+        WHERE cc.status=1 AND sc.status=1
         GROUP BY cc.cid, cc.camp_name, cc.description, cc.camp_style, cc.province
     """)
 
