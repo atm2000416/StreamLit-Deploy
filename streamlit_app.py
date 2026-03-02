@@ -1261,33 +1261,42 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         len(user_text.split()) <= 4  # short query like "vegetarian camps"
     )
 
-    # If bare ambiguous query with no DB results → ask clarifying question
-    if not camps and is_bare_ambiguous:
+    # Dietary/lifestyle keywords: always clarify on bare query,
+    # regardless of whether SQL returned camps (those camps are not relevant).
+    # Only skip clarification if user already specified cooking as the activity
+    # (e.g. "vegetarian cooking camps" → cooking is the real activity).
+    activity_is_cooking = activity_raw in ('cooking', 'baking', 'culinary', 'chef')
+    user_specified_cooking = any(w in query_lower for w in ('cooking', 'baking', 'culinary', 'chef', 'food'))
+
+    if is_bare_ambiguous and not user_specified_cooking:
         elapsed = time.time() - start
         search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={qp(matched_ambiguous + ' camps')}"
         response = (
-            f"I want to make sure I find the right camps for you! When you say **'{matched_ambiguous} camps'**, do you mean:\n\n"
-            f"1. 🏕️ **Camps that specifically identify as {matched_ambiguous}** (e.g. a camp with a {matched_ambiguous} philosophy or program)\n"
-            f"2. 🥗 **Camps that accommodate {matched_ambiguous} dietary needs** for your child\n\n"
-            f"In the meantime, you can also browse our full directory here:\n"
-            f"🔍 [Search camps.ca for '{matched_ambiguous} camps']({search_url})\n\n"
-            f"*Just reply with 1 or 2, or add more details like location or your child's age and I'll search our member network!*"
+            f"I want to make sure I find the right camps! When you say **'{matched_ambiguous} camps'**, do you mean:\n\n"
+            f"1. 🏕️ **Camps that offer {matched_ambiguous} cooking or food programs**\n"
+            f"2. 🥗 **Any camp that accommodates {matched_ambiguous} dietary needs** for your child\n\n"
+            f"*Just reply with 1 or 2, or tell me a location and age and I'll search from there!*\n\n"
+            f"🔍 [Browse camps.ca for '{matched_ambiguous} camps']({search_url})"
         )
         return response, elapsed, filters
 
-    # If ambiguous keyword WITH context (location/age etc.) and no results → show search URL
-    if not camps and matched_ambiguous:
+    # If ambiguous keyword with context (location/age) but no camps → honest message
+    if not camps and matched_ambiguous and not user_specified_cooking:
         elapsed = time.time() - start
         search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={qp(matched_ambiguous + ' camps')}"
         response = (
-            f"I couldn't find camps in our verified member network specifically matching **{matched_ambiguous}**"
-            f"{' in ' + filters.get('region', filters.get('province', '')) if has_location else ''}.\n\n"
-            f"Many camps accommodate {matched_ambiguous} needs — we recommend contacting camps directly.\n\n"
-            f"You can also browse our full directory:\n"
+            f"I couldn't find camps specifically matching **{matched_ambiguous}**"
+            f"{' in ' + filters.get('region', filters.get('province', '')) if has_location else ''} in our verified network.\n\n"
+            f"Many camps accommodate {matched_ambiguous} dietary needs — we recommend contacting camps directly to confirm.\n\n"
             f"🔍 [Search camps.ca for '{matched_ambiguous} camps']({search_url})\n\n"
-            f"💬 *Try searching by location, age, or activity type and I'll find verified member camps for you!*"
+            f"💬 *Or try searching by activity (e.g. 'cooking camps') and I'll find verified member camps!*"
         )
         return response, elapsed, filters
+
+    # If user asked for vegetarian cooking specifically → redirect to cooking search
+    if matched_ambiguous and user_specified_cooking and not activity_is_cooking:
+        filters['activity'] = 'cooking'
+        activity_raw = 'cooking'
 
     # Step 4: Deduplicate then enforce gold-first cap — gold always included
     raw_deduped = dedupe_camps(camps) if camps else []
