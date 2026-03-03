@@ -177,16 +177,17 @@ def load_client_camps(config):
 # ═════════════════════════════════════════════
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Auto-discovered once per session — no hardcoded model names
+# Auto-discovered once per session — no hardcoded model names needed
 _GENERATE_MODEL_CACHE: str | None = None
 
 
 def _get_generate_model(api_key: str) -> str | None:
     """
-    Discover best available generateContent model via ListModels.
-    Filters out specialty models (TTS, image-gen, robotics, etc.).
-    Prefers gemini-2.x-flash; falls back to any flash, then anything.
-    Cached per session.
+    Discover best available generateContent model via ListModels API.
+    Filters out specialty models (TTS, image-gen, robotics, computer-use).
+    Preference order: gemini-2.x-flash-non-lite > gemini-2.x-flash-lite >
+                      gemini-flash-latest > any other flash > any gemini.
+    Result cached per session; cleared on HTTP error to force rediscovery.
     """
     global _GENERATE_MODEL_CACHE
     if _GENERATE_MODEL_CACHE:
@@ -197,7 +198,7 @@ def _get_generate_model(api_key: str) -> str | None:
         resp = _req.get(f"{BASE}/models?key={api_key}", timeout=10)
         if resp.ok:
             all_models = resp.json().get("models", [])
-            # Filter to text-only generateContent models
+            # Keep text-only generateContent models; skip specialty variants
             gen_models = [
                 m["name"] for m in all_models
                 if "generateContent" in m.get("supportedGenerationMethods", [])
@@ -220,7 +221,7 @@ def _get_generate_model(api_key: str) -> str | None:
                 _GENERATE_MODEL_CACHE = gen_models[0]
                 _tracer_log(f"_get_generate_model: selected {_GENERATE_MODEL_CACHE}")
                 return _GENERATE_MODEL_CACHE
-        _tracer_log(f"_get_generate_model: ListModels failed {resp.status_code}")
+        _tracer_log(f"_get_generate_model: ListModels failed {resp.status_code}: {resp.text[:100]}")
     except Exception as e:
         _tracer_log(f"_get_generate_model: exception {e}")
     return None
@@ -228,10 +229,13 @@ def _get_generate_model(api_key: str) -> str | None:
 
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
     """
-    Call Gemini generateContent API.
-    Model auto-discovered via ListModels — works across any API key tier.
-    Thinking/reasoning tokens disabled via thinkingConfig to prevent token
-    budget exhaustion on short-output calls (filter extraction, closing questions).
+    Call Gemini generateContent API with auto-discovered model.
+
+    Key design decisions:
+    - Model discovered via ListModels (not hardcoded) so it works across API key tiers
+    - thinkingBudget=0 disables reasoning tokens on Gemini 2.5 models, preventing
+      token budget exhaustion on short-output calls (JSON extraction, closing questions)
+    - Cache cleared on HTTP error to force rediscovery on next call
     """
     import requests
     import streamlit as _st
@@ -244,16 +248,14 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
         return ""
 
     _tracer_log(f"call_gemini: model={model} max_tokens={max_tokens}")
-
-    # Disable thinking tokens on 2.5 models to prevent budget exhaustion.
-    # Thinking is unnecessary for structured JSON extraction and short blurbs.
-    use_thinking = False
-    thinking_cfg = {"thinkingConfig": {"thinkingBudget": 0}} if not use_thinking else {}
-
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens, **thinking_cfg}
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": max_tokens,
+            "thinkingConfig": {"thinkingBudget": 0}  # disable reasoning tokens on 2.5 models
+        }
     }
     try:
         resp = requests.post(
@@ -277,7 +279,7 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
             return ""
         else:
             global _GENERATE_MODEL_CACHE
-            _GENERATE_MODEL_CACHE = None
+            _GENERATE_MODEL_CACHE = None  # clear cache so next call rediscovers
             msg = f"{model} HTTP {resp.status_code}: {resp.text[:300]}"
             _tracer_log(f"call_gemini: FAILED {msg}")
             _st.session_state['_gemini_error'] = msg
@@ -335,7 +337,7 @@ def _validate_filters(filters, user_text):
         validated['style'] = None
 
     # Age: must have a number or age word
-    if filters.get('age') and not re.search(r'\d+[-\s]*(?:yr|year|yrs|-year)|teen|toddler|\d+\s*yo\b', text):
+    if filters.get('age') and not re.search(r'\d+\s*(?:yr|year|yrs)|teen|toddler', text):
         validated['age'] = None
 
     return validated
@@ -528,9 +530,9 @@ Examples:
 - no gender mention → gender: null
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
-    _tracer_log(f"extract_filters: '{user_text[:80]}'")
+    _tracer_log(f"extract_filters: input='{user_text[:80]}'")
     result = call_gemini(system, user_text, api_key, max_tokens=400)
-    _tracer_log(f"extract_filters: raw='{result[:120] if result else 'EMPTY'}'")
+    _tracer_log(f"extract_filters: raw='{(result or 'EMPTY')[:120]}'")
     import json, re
     try:
         clean = re.sub(r'```json|```', '', result).strip()
@@ -541,7 +543,7 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         _tracer_log(f"extract_filters: parsed={parsed}")
         return parsed
     except Exception as _ef:
-        _tracer_log(f"extract_filters: parse FAILED raw='{result[:120]}' err={_ef}")
+        _tracer_log(f"extract_filters: parse FAILED raw='{(result or '')[:120]}' err={_ef}")
         return {}
 
 
@@ -601,9 +603,9 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         params['province'] = province
 
     if resolved_region:
-        # GTA suburb → DB region alias map.
+        # GTA suburb → DB region alias.
         # sessions_clean.region stores "Halton - Peel", not "Mississauga" etc.
-        # When a known suburb is searched, expand to also match the DB region name.
+        # When a known GTA suburb is searched, also match its DB region name.
         _GTA_REGION_ALIASES = {
             'mississauga': 'halton - peel', 'brampton': 'halton - peel',
             'oakville': 'halton - peel',    'burlington': 'halton - peel',
@@ -618,14 +620,14 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         }
         _region_alias = _GTA_REGION_ALIASES.get(resolved_region.lower())
         if _region_alias:
-            # Match city OR original region name OR DB region alias
-            conditions.append("(sc.city LIKE :city OR sc.region LIKE :region OR sc.region LIKE :region_alias)")
+            conditions.append(
+                "(sc.city LIKE :city OR sc.region LIKE :region OR sc.region LIKE :region_alias)"
+            )
             params['city']         = f"%{resolved_region}%"
             params['region']       = f"%{resolved_region}%"
             params['region_alias'] = f"%{_region_alias}%"
-            _tracer_log(f"search_camps: GTA alias '{resolved_region}' → also matching region LIKE '%{_region_alias}%'")
+            _tracer_log(f"search_camps: GTA alias '{resolved_region}' → also matching '%{_region_alias}%'")
         else:
-            # Search city column first (exact source of truth), then region name
             conditions.append("(sc.city LIKE :city OR sc.region LIKE :region)")
             params['city']   = f"%{resolved_region}%"
             params['region'] = f"%{resolved_region}%"
@@ -907,7 +909,10 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         WHERE {where}
         GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style,
                  sc.listing_tier, sc.camp_url, cc.description
-        ORDER BY FIELD(sc.listing_tier, 'gold', 'silver', 'bronze'), sc.camp_name
+        ORDER BY sc.camp_name
+        -- NOTE: Tier ordering intentionally removed from retrieval SQL.
+        -- Gold/tier is a post-relevance merchandising signal applied in score_and_rank,
+        -- not a retrieval priority. (Arch principle: eligibility → relevance → merchandising)
         LIMIT {limit}"""
 
     _tracer_log(f"search_camps: province={province} region={resolved_region} activity={activity} age={age} style={style}")
@@ -920,7 +925,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
             cols   = list(result.keys())
 
             if rows:
-                _tracer_log(f"search_camps: PRIMARY {len(rows)} rows")
+                _tracer_log(f"search_camps: PRIMARY hit — {len(rows)} rows")
                 return [dict(zip(cols, row)) for row in rows], province, resolved_region, None, _activity_has_codes
 
             # Fallbacks 1 & 2 removed — activity is no longer a SQL filter.
@@ -944,7 +949,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                     "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
                     "WHERE sc.status=1 AND sc.province=:p AND sc.province != 'Virtual Program' AND sc.is_virtual=0 "
                     "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
-                    "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
+                    "ORDER BY sc.camp_name LIMIT :lim"
                 ), {"p": province, "lim": limit})
                 rows3 = r3.fetchall()
                 if rows3:
@@ -965,7 +970,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
                 "JOIN camp_directory.camps_clean cc ON cc.cid = sc.cid AND cc.province = sc.province "
                 "WHERE sc.status=1 AND sc.province != 'Unknown' AND sc.province != 'Virtual Program' AND sc.is_virtual=0 "
                 "GROUP BY sc.cid, sc.camp_name, sc.province, sc.camp_style, sc.listing_tier, sc.camp_url, cc.description "
-                "ORDER BY FIELD(sc.listing_tier,'gold','silver','bronze') LIMIT :lim"
+                "ORDER BY sc.camp_name LIMIT :lim"
             ), {"lim": limit})
             rows4 = r4.fetchall()
             return [dict(zip(list(r4.keys()), row)) for row in rows4], province, resolved_region, 'no_match', _activity_has_codes
@@ -1001,20 +1006,42 @@ def dedupe_camps(camps):
 
 def score_and_rank(camps, filters, fallback):
     """
-    Hybrid relevancy scorer combining:
-      1. Semantic similarity (_semantic_score set by semantic_score_camps())
-      2. Structural signals: location, age, style, gender
+    Accuracy-first hybrid relevancy scorer.
 
-    Weights (rescaled to active filters only):
-      Semantic (activity/topic) : 0.50
-      Location                  : 0.20
-      Age                       : 0.15
-      Style (day/overnight)     : 0.08
-      Gender                    : 0.07
+    Architecture principles enforced:
+      P1 — Eligibility before relevance (handled upstream; fallback flag informs scoring)
+      P3 — Gold/tier is post-relevance merchandising, not a retrieval tiebreak
+      P4 — Missing feature data excluded from weighted denominator (not penalized as 0)
 
-    Sort: combined_score DESC, then tier ASC (gold > silver > bronze)
+    Feature weights (raw — re-normalized over available/applicable features only):
+      semantic  : 0.50   (None when no activity searched)
+      location  : 0.20   (None when no location searched)
+      age       : 0.15   (None when no age searched)
+      style     : 0.08   (None when not specified)
+      gender    : 0.07   (None when not specified)
+
+    Gold merchandising (post-relevance only):
+      A 1.08x multiplier is applied AFTER relevance scoring, only when:
+        - listing_tier == 'gold'
+        - relevance_score >= GOLD_THRESHOLD (0.40)
+      Gold cannot create relevance from nothing. It can only amplify
+      relevance that already exists. Both relevance_score and final_score
+      are stored on each camp for transparency.
+
+    Sort: final_score DESC (Gold nudge already baked in)
     """
-    TIER_RANK = {'gold': 1, 'silver': 2, 'bronze': 3}
+    # Raw feature weights — will be re-normalized over available features only
+    RAW_WEIGHTS = {
+        'semantic': 0.50,
+        'location': 0.20,
+        'age':      0.15,
+        'style':    0.08,
+        'gender':   0.07,
+    }
+
+    # Gold merchandising config
+    GOLD_THRESHOLD  = 0.40   # minimum relevance to receive Gold boost
+    GOLD_MULTIPLIER = 1.08   # max 8% boost — cannot manufacture relevance
 
     searched_age      = filters.get('age')
     searched_style    = (filters.get('style') or '').lower().strip()
@@ -1023,76 +1050,105 @@ def score_and_rank(camps, filters, fallback):
     searched_province = (filters.get('province') or '').lower().strip()
     searched_activity = (filters.get('activity') or '').lower().strip()
 
-    W = {}
-    if searched_activity:                     W['semantic']  = 0.50
-    if searched_region or searched_province:  W['location']  = 0.20
-    if searched_age:                          W['age']       = 0.15
-    if searched_style:                        W['style']     = 0.08
-    if searched_gender:                       W['gender']    = 0.07
-
-    total_w = sum(W.values()) or 1.0
-    norm    = {k: v / total_w for k, v in W.items()}
-
     def score_camp(c):
-        s = 0.0
+        # ── Compute per-feature scores; None = feature not applicable or data missing ──
+        feature_scores = {}
 
         # Semantic — cosine similarity from embedding comparison
-        if 'semantic' in norm:
-            s += norm['semantic'] * c.get('_semantic_score', 0.5)
+        # None when no activity searched (feature excluded from denominator)
+        if searched_activity:
+            raw = c.get('_semantic_score')
+            feature_scores['semantic'] = float(raw) if raw is not None else None
 
-        # Location — city (ground truth) > region > province
-        if 'location' in norm:
+        # Location — city (ground truth) > region > province > fallback
+        # None when no location searched
+        if searched_region or searched_province:
             camp_city     = (c.get('city') or '').lower()
             camp_region   = (c.get('region') or '').lower()
             camp_province = (c.get('province') or '').lower()
             if searched_region and searched_region in camp_city:
-                s += norm['location']
+                feature_scores['location'] = 1.00
             elif searched_region and searched_region in camp_region:
-                s += norm['location'] * 0.85
+                feature_scores['location'] = 0.85
             elif searched_province and searched_province in camp_province:
-                s += norm['location'] * 0.60
+                feature_scores['location'] = 0.60
             elif fallback in ('province_only', 'no_match'):
-                s += norm['location'] * 0.20
+                feature_scores['location'] = 0.20
+            else:
+                feature_scores['location'] = 0.00
 
-        # Age — within range, with tightness bonus
-        if 'age' in norm:
+        # Age — within range with tightness bonus; None when age not searched
+        # Missing age_min/age_max → excluded (None), not penalized as 0
+        if searched_age is not None:
             age_min = c.get('age_min')
             age_max = c.get('age_max')
             if age_min is not None and age_max is not None:
                 if age_min <= searched_age <= age_max:
                     tightness = max(0.0, 1.0 - (max(age_max - age_min, 1) - 1) / 18)
-                    s += norm['age'] * (0.7 + 0.3 * tightness)
+                    feature_scores['age'] = 0.7 + 0.3 * tightness
+                else:
+                    feature_scores['age'] = 0.00
+            # else: age bounds missing → None (excluded from denominator)
 
-        # Style
-        if 'style' in norm:
-            if searched_style == (c.get('camp_style') or '').lower():
-                s += norm['style']
+        # Style — None when not searched
+        if searched_style:
+            camp_style = (c.get('camp_style') or '').lower()
+            feature_scores['style'] = 1.0 if searched_style == camp_style else 0.0
 
-        # Gender
-        if 'gender' in norm:
+        # Gender — None when not searched
+        if searched_gender:
             cg = c.get('gender')
-            if searched_gender == 'girls' and cg == 2:
-                s += norm['gender']
-            elif searched_gender == 'boys' and cg == 3:
-                s += norm['gender']
+            if searched_gender == 'girls':
+                feature_scores['gender'] = 1.0 if cg == 2 else 0.0
+            elif searched_gender == 'boys':
+                feature_scores['gender'] = 1.0 if cg == 3 else 0.0
 
-        # Tightness bonus when age not searched
-        if 'age' not in norm:
+        # ── Weighted average over available features only (P4) ──────────────────
+        # Missing data (None) excluded from denominator, not counted as 0.
+        numerator   = 0.0
+        denominator = 0.0
+        for feat, score in feature_scores.items():
+            if score is not None:
+                w            = RAW_WEIGHTS.get(feat, 0)
+                numerator   += w * score
+                denominator += w
+
+        # Minor quality signal: age range tightness when age not searched
+        if searched_age is None:
             age_min = c.get('age_min')
             age_max = c.get('age_max')
             if age_min is not None and age_max is not None:
-                tightness = max(0.0, 1.0 - (max(age_max - age_min, 1) - 1) / 18)
-                s += 0.03 * tightness
+                tightness    = max(0.0, 1.0 - (max(age_max - age_min, 1) - 1) / 18)
+                numerator   += 0.03 * tightness
+                denominator += 0.03
 
-        return round(s, 4)
+        relevance_score = (numerator / denominator) if denominator > 0 else 0.0
+
+        # ── Gold merchandising: post-relevance multiplier only (P3) ────────────
+        # Gold cannot create relevance. It amplifies existing relevance only.
+        is_gold = (c.get('listing_tier') or '').lower() == 'gold'
+        if is_gold and relevance_score >= GOLD_THRESHOLD:
+            final_score = min(1.0, relevance_score * GOLD_MULTIPLIER)
+        else:
+            final_score = relevance_score
+
+        # Store both scores for transparency/debugging
+        c['_relevancy']      = round(relevance_score, 4)
+        c['_final_score']    = round(final_score, 4)
+        c['_feature_scores'] = {k: (round(v, 4) if v is not None else None)
+                                 for k, v in feature_scores.items()}
+        return final_score
 
     for c in camps:
-        c['_relevancy'] = score_camp(c)
+        score_camp(c)
 
-    camps.sort(key=lambda c: (
-        -c['_relevancy'],
-        TIER_RANK.get(c.get('listing_tier'), 4)
-    ))
+    # Sort by final_score DESC — Gold nudge baked in
+    camps.sort(key=lambda c: -c.get('_final_score', 0))
+
+    _tracer_log(
+        f"score_and_rank: {len(camps)} camps scored | "
+        f"top3={[(c.get('camp_name','?')[:18], c.get('_final_score')) for c in camps[:3]]}"
+    )
     return camps
 
 
@@ -1106,7 +1162,8 @@ def build_camp_url(c):
 
 def generate_blurbs(deduped, user_text, api_key):
     """Single Gemini call: given N camps, return N one-sentence Why-it-fits blurbs."""
-    # Cap at 15 to stay within token budget across all model tiers
+    # Cap at 15 camps to stay within token budget across all model tiers.
+    # Gemini 2.5 Flash uses more output tokens per blurb than 2.0.
     blurb_camps = deduped[:15]
     camp_snippets = []
     for i, c in enumerate(blurb_camps, 1):
@@ -1121,13 +1178,13 @@ def generate_blurbs(deduped, user_text, api_key):
 
     system = (
         "You are a Canadian camp consultant. "
-        "For each numbered camp write ONE sentence (max 20 words) on why it fits the search. "
+        "For each numbered camp write ONE sentence (max 20 words) explaining why it fits. "
         "Be specific — name the program or a standout detail. Stay positive. "
         "Reply ONLY in this exact format, one line per camp:\n"
         "1: <blurb>\n2: <blurb>\n..."
     )
     user_prompt = f"Search: {user_text}\n\n" + "\n\n".join(camp_snippets)
-    _tracer_log(f"generate_blurbs: {len(blurb_camps)} camps, prompt ~{len(user_prompt)} chars")
+    _tracer_log(f"generate_blurbs: {len(blurb_camps)} camps | prompt ~{len(user_prompt)} chars")
 
     raw = call_gemini(system, user_prompt, api_key, max_tokens=3000)
 
@@ -1263,16 +1320,31 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     if is_hard_reset:
         last_filters = None   # wipe context so decision tree treats this as fresh
 
-    # Hard-reset phrases — wipe last_filters so decision tree starts fresh
-    fresh_search_phrases = [
+    # Pure single-word affirmatives — no new info, reuse filters wholesale
+    # Hard-reset phrases — wipe last_filters so decision tree starts completely fresh
+    _fresh_phrases = [
         'new search', 'start over', 'start fresh', 'reset', 'forget everything',
         'different search', 'never mind', 'nevermind', 'scratch that',
     ]
-    if any(p in text_lower_check for p in fresh_search_phrases):
-        _tracer_log("process_query: hard reset — clearing last_filters")
+    if any(p in text_lower_check for p in _fresh_phrases):
+        _tracer_log("process_query: hard reset detected — clearing last_filters")
         last_filters = None
 
-    # Pure single-word affirmatives — no new info, reuse filters wholesale
+    # Activity negation: "these are not hockey camps", "those aren't AI camps" etc.
+    # User is rejecting the current activity result entirely → clear last_filters
+    # so no stale activity is inherited.
+    import re as _ren
+    _neg_patterns = [
+        r"these are not\s+\w", r"those are not\s+\w",
+        r"these aren.t\s+\w",  r"those aren.t\s+\w",
+        r"not\s+\w+\s+camps",
+        r"wrong\s+(activity|camps|sport|type)",
+        r"completely (different|wrong|off)",
+    ]
+    if any(_ren.search(p, text_lower_check) for p in _neg_patterns):
+        _tracer_log("process_query: activity negation detected — clearing last_filters")
+        last_filters = None
+
     affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
     is_affirmative = text_lower_check.rstrip('!.') in affirmatives
 
@@ -1308,32 +1380,6 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         "how about ", "didn't you", "did you miss",
     ]
     is_correction = any(p in text_lower_check for p in correction_patterns)
-
-    # Detect full-sentence activity negations:
-    # "these are not rock climbing camps", "those aren't hockey camps", etc.
-    # These mean: the user is REJECTING the current results as the wrong activity.
-    # Action: treat as a fresh search — do NOT inherit last activity.
-    import re as _re_neg
-    _negation_activity_patterns = [
-        r"these are not\s+\w",
-        r"those are not\s+\w",
-        r"these aren.t\s+\w",
-        r"those aren.t\s+\w",
-        r"not\s+\w+\s+camps",
-        r"not looking for\s+\w+\s+camps",
-        r"don.t want\s+\w+\s+camps",
-        r"wrong\s+(activity|camps|sport|type)",
-        r"completely (different|wrong|off)",
-    ]
-    is_activity_negation = any(
-        _re_neg.search(p, text_lower_check)
-        for p in _negation_activity_patterns
-    )
-    if is_activity_negation:
-        _tracer_log(f"process_query: activity negation detected — will strip inherited activity")
-        # Force a fresh search by clearing last_filters activity
-        # (the new filters will be extracted from the rest of the message)
-        last_filters = None
 
     # If this is a correction, try to extract any camp name mentioned in the message
     # e.g. "isn't Teen Ranch overnight too?" → named_camp_override = "Teen Ranch"
@@ -1427,7 +1473,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
     )
-    _tracer_log(f"process_query: {len(camps)} camps, fallback={fallback}, codes={_activity_has_codes}")
+    _tracer_log(f"process_query: {len(camps)} camps returned | fallback={fallback} | codes={_activity_has_codes}")
 
     # Step 4: Build context string for Gemini
     # For dietary/niche keywords with no results, return a camps.ca search URL
@@ -1531,7 +1577,20 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # This handles "AI camps in Mississauga" where no AI camp is local but semantic
     # can find the closest matches from the broader fallback pool.
     if _activity_has_codes and is_activity_fallback:
-        _tracer_log(f"process_query: activity fallback (fallback={fallback}), clearing codes flag → semantic")
+        # ── HARD GATE (Architecture principle P1) ──────────────────────────────
+        # Specialty code SQL fired but fell back because no local matches existed.
+        # The camps in raw_deduped come from the province/global pool — they are
+        # NOT confirmed specialty matches. Assigning them _semantic_score=0.9 as
+        # if they passed the specialty gate would violate "eligibility before
+        # relevance": irrelevant camps would rank as confirmed AI/hockey/dance camps.
+        #
+        # Fix: clear the codes flag so semantic re-ranking runs on the fallback pool,
+        # surfacing any camps that are genuinely relevant by topic similarity.
+        _tracer_log(
+            f"HARD GATE: codes=True but fallback={fallback!r}. "
+            f"Fallback pool is NOT specialty-matched. "
+            f"Clearing codes flag → routing to semantic re-ranking."
+        )
         _activity_has_codes = False
 
     if not raw_deduped:
@@ -2082,7 +2141,7 @@ def _show_embedding_admin(config):
                     m["name"] for m in _models
                     if "embedContent" in m.get("supportedGenerationMethods", [])
                 ]
-                # ── generateContent models (filter extraction + blurbs) ──
+                # ── generateContent models (filter extraction + blurbs) ───────
                 _gen_models = [
                     m["name"] for m in _models
                     if "generateContent" in m.get("supportedGenerationMethods", [])
@@ -2096,13 +2155,16 @@ def _show_embedding_admin(config):
                     for _m in _gen_models:
                         st.code(_m)
                     _gen_best = _gen_models[0]
-                    st.write(f"Live-testing `{_gen_best}` with thinking disabled...")
+                    st.write(f"Live-testing `{_gen_best}` (thinkingBudget=0)...")
                     _gen_test = _tr.post(
                         f"https://generativelanguage.googleapis.com/v1beta/{_gen_best}:generateContent",
                         headers={"Content-Type": "application/json", "x-goog-api-key": _api_key},
                         json={
                             "contents": [{"role": "user", "parts": [{"text": "Reply with the single word: WORKING"}]}],
-                            "generationConfig": {"temperature": 0, "maxOutputTokens": 20, "thinkingConfig": {"thinkingBudget": 0}}
+                            "generationConfig": {
+                                "temperature": 0, "maxOutputTokens": 20,
+                                "thinkingConfig": {"thinkingBudget": 0}
+                            }
                         },
                         timeout=15
                     )
@@ -2114,25 +2176,27 @@ def _show_embedding_admin(config):
                         if _gt:
                             st.success(f"✅ generateContent working — replied: '{_gt}' (finishReason={_gf})")
                         else:
-                            st.warning(f"⚠️ Empty reply (finishReason={_gf}) — may be safety block")
+                            st.warning(f"⚠️ Empty reply (finishReason={_gf}) — possible safety block")
                     else:
-                        st.error(f"❌ FAILED {_gen_test.status_code}: {_gen_test.text[:300]}")
+                        st.error(f"❌ generateContent FAILED {_gen_test.status_code}: {_gen_test.text[:300]}")
                 else:
-                    st.error("❌ No generateContent models for this API key!")
-                    st.write("All models:")
+                    st.error("❌ No generateContent models available for this API key!")
+                    st.markdown("All available models:")
                     for _m in _models[:15]:
                         st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
 
-                # ── Embedding models ─────────────────────────────────────
+                # ── Embedding models (semantic search) ───────────────────────
                 st.markdown("**🔢 Embedding models (semantic search):**")
                 if _embed_models:
                     for _m in _embed_models:
                         st.code(_m)
                     _best = _embed_models[0]
+                    st.write(f"Testing `{_best}`...")
                     _test_resp = _tr.post(
                         f"https://generativelanguage.googleapis.com/v1beta/{_best}:embedContent?key={_api_key}",
                         headers={"Content-Type": "application/json"},
-                        json={"model": _best, "content": {"parts": [{"text": "test"}]},
+                        json={"model": _best,
+                              "content": {"parts": [{"text": "test"}]},
                               "taskType": "RETRIEVAL_DOCUMENT"},
                         timeout=15
                     )
@@ -2142,7 +2206,9 @@ def _show_embedding_admin(config):
                     else:
                         st.error(f"embedContent failed: {_test_resp.text[:300]}")
                 else:
-                    st.error("No embedding models available")
+                    st.error("No embedding models available for this API key")
+                    for _m in _models[:10]:
+                        st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
             else:
                 st.error(f"ListModels failed {_list_resp.status_code}: {_list_resp.text[:300]}")
         except Exception as _te:
@@ -2290,16 +2356,17 @@ with st.sidebar:
         _show_embedding_admin(config)
 
     with st.expander("🔬 Debug: Tracer Log", expanded=False):
-        _tracer_on = st.toggle("Enable tracer (logs next search)",
-                               value=st.session_state.get('_tracer_on', False))
-        st.session_state['_tracer_on'] = _tracer_on
-        if st.button("🗑️ Clear tracer log", use_container_width=True):
+        _t_on = st.toggle("Enable tracer (active on next search)",
+                          value=st.session_state.get('_tracer_on', False))
+        st.session_state['_tracer_on'] = _t_on
+        col_a, col_b = st.columns(2)
+        if col_a.button("🗑️ Clear log", use_container_width=True):
             st.session_state['_tracer'] = []
-        _log = st.session_state.get('_tracer', [])
-        if _log:
-            st.code("\n".join(_log), language=None)
+        _t_log = st.session_state.get('_tracer', [])
+        if _t_log:
+            st.code("\n".join(_t_log), language=None)
         else:
-            st.caption("No entries yet. Enable tracer then run a search.")
+            st.caption("No entries yet. Enable tracer, then run a search.")
         _gerr = st.session_state.get('_gemini_error', '')
         if _gerr:
             st.error(f"Last Gemini error: {_gerr}")
