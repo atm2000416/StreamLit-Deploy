@@ -1525,6 +1525,244 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
     return intro + "\n".join(blocks)
 
 
+
+# ===============================================================================
+# SMART FOLLOW-UP: Diagnose why no results and ask a targeted question
+# ===============================================================================
+
+def _diagnose_availability(activity, filters, engine, config):
+    """Check WHERE a given activity exists in the DB to give targeted suggestions.
+    Returns a dict with diagnostic info:
+      - nearby_regions: list of (region, province, count) where this activity is found
+      - total_nationwide: total camps with this activity across Canada
+      - has_age_issue: True if removing age filter would help
+      - has_style_issue: True if removing style filter would help
+    """
+    from sqlalchemy import text as _text
+    result = {
+        'nearby_regions': [],
+        'total_nationwide': 0,
+        'has_age_issue': False,
+        'has_style_issue': False,
+    }
+    if not activity or not engine:
+        return result
+
+    try:
+        with engine.connect() as conn:
+            # Search by specialty_label text (works for all activities, no code lookup needed)
+            search_term = f"%{activity}%"
+            rows = conn.execute(_text(
+                "SELECT sc.region, sc.province, COUNT(DISTINCT sc.cid) AS cnt "
+                "FROM camp_directory.sessions_clean sc "
+                "WHERE sc.status = 1 AND sc.is_virtual = 0 "
+                "AND sc.province != 'Unknown' AND sc.province != 'Virtual Program' "
+                "AND (sc.specialty_label LIKE :term "
+                "     OR sc.class_name LIKE :term) "
+                "GROUP BY sc.region, sc.province "
+                "ORDER BY cnt DESC LIMIT 10"
+            ), {'term': search_term}).fetchall()
+            result['nearby_regions'] = [(r[0], r[1], r[2]) for r in rows]
+            result['total_nationwide'] = sum(r[2] for r in rows)
+
+            # Check if age filter is eliminating results in the searched province
+            age = filters.get('age')
+            province = filters.get('province')
+            if age and province:
+                without_age = conn.execute(_text(
+                    "SELECT COUNT(DISTINCT sc.cid) "
+                    "FROM camp_directory.sessions_clean sc "
+                    "WHERE sc.status = 1 AND sc.is_virtual = 0 "
+                    "AND sc.province = :prov "
+                    "AND (sc.specialty_label LIKE :term "
+                    "     OR sc.class_name LIKE :term)"
+                ), {'prov': province, 'term': search_term}).scalar()
+                if without_age and without_age > 0:
+                    result['has_age_issue'] = True
+
+            # Check if style filter is eliminating results
+            style = filters.get('style')
+            if style and province:
+                without_style = conn.execute(_text(
+                    "SELECT COUNT(DISTINCT sc.cid) "
+                    "FROM camp_directory.sessions_clean sc "
+                    "WHERE sc.status = 1 AND sc.is_virtual = 0 "
+                    "AND sc.province = :prov "
+                    "AND (sc.specialty_label LIKE :term "
+                    "     OR sc.class_name LIKE :term)"
+                ), {'prov': province, 'term': search_term}).scalar()
+                if without_style and without_style > 0:
+                    result['has_style_issue'] = True
+
+    except Exception as e:
+        _tracer_log(f"_diagnose_availability: error -- {e}")
+    return result
+
+
+def _build_no_results_response(
+    activity_query,
+    filters,
+    is_recognised_activity,
+    fallback=None,
+    diagnosis=None,
+):
+    """Build a smart follow-up message that diagnoses WHY no results were found
+    and asks a targeted question to help the user refine their search."""
+    from urllib.parse import quote_plus as _qp
+
+    loc       = filters.get('region') or filters.get('province')
+    province  = filters.get('province')
+    region    = filters.get('region')
+    age       = filters.get('age')
+    style     = filters.get('style')
+    search_kw = activity_query or 'camps'
+    search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp(search_kw + ' camps')}"
+    diag      = diagnosis or {}
+
+    # ── Case 1: Recognised activity, location-specific ───────────────────────
+    if activity_query and is_recognised_activity and loc:
+        nearby = diag.get('nearby_regions', [])
+        total  = diag.get('total_nationwide', 0)
+
+        # Build a targeted suggestion based on where camps actually exist
+        parts = []
+        parts.append(
+            f"I couldn't find **{activity_query} camps** in **{loc}** "
+            f"in our verified member network."
+        )
+
+        # Tell the user WHERE the activity IS available
+        if nearby:
+            # Filter to regions different from the searched one
+            other_regions = [
+                (r, p, c) for r, p, c in nearby
+                if r and r.lower() != (region or '').lower()
+            ]
+            if other_regions:
+                # Show top 3 nearby areas
+                top = other_regions[:3]
+                area_list = ", ".join(
+                    f"**{r}** ({c} camp{'s' if c > 1 else ''})"
+                    for r, p, c in top
+                )
+                parts.append(
+                    f"\nHowever, I found {activity_query} camps in: {area_list}."
+                )
+                parts.append(
+                    f"\nWould you like me to search one of these areas instead?"
+                )
+            elif province and total > 0:
+                parts.append(
+                    f"\nThere are **{total} {activity_query} camp{'s' if total > 1 else ''}** "
+                    f"elsewhere in {province}."
+                )
+                parts.append(
+                    f"\nWant me to search all of {province}?"
+                )
+        else:
+            # No diagnostic data — give general suggestions
+            suggestions = []
+            if region and province:
+                suggestions.append(
+                    f"**Widen the area** — I can search all of {province} instead of just {region}"
+                )
+            elif province:
+                suggestions.append(
+                    "**Try a different province** — tell me which one"
+                )
+
+            if diag.get('has_age_issue') and age:
+                suggestions.append(
+                    f"**Adjust the age** — I found {activity_query} camps in {province} "
+                    f"but none matched age {age}"
+                )
+            elif age:
+                suggestions.append(
+                    f"**Remove the age filter** — filtering for age {age} might be too narrow"
+                )
+
+            if diag.get('has_style_issue') and style:
+                suggestions.append(
+                    f"**Remove the {style} filter** — there may be {activity_query} camps in a different style"
+                )
+            elif style:
+                suggestions.append(
+                    f"**Remove the {style} filter** — there might be {activity_query} camps in a different style"
+                )
+
+            suggestions.append(
+                f"**Try a related activity** — what specifically interests your child about {activity_query}?"
+            )
+            suggestions.append(
+                f"[Search camps.ca for {activity_query} camps]({search_url})"
+            )
+
+            bullets = "\n".join(f"- {s}" for s in suggestions)
+            parts.append(f"\nHere's what I can try:\n\n{bullets}")
+
+        parts.append("\n\n*What would you like me to try?*")
+        return "".join(parts)
+
+    # ── Case 2: Recognised activity, no location ─────────────────────────────
+    if activity_query and is_recognised_activity and not loc:
+        nearby = diag.get('nearby_regions', [])
+        if nearby:
+            top = nearby[:4]
+            area_list = ", ".join(
+                f"**{r}** in {p}" for r, p, c in top if r
+            )
+            return (
+                f"I found **{activity_query} camps** in a few areas: {area_list}.\n\n"
+                f"**Which area works best for you?** "
+                f"Or tell me your city and I'll find the closest options."
+            )
+        return (
+            f"I searched for **{activity_query} camps** across Canada but "
+            f"couldn't find a match in our verified network.\n\n"
+            f"Could you tell me **where** you're looking? "
+            f"A city or province will help me find nearby options.\n\n"
+            f"Or try: [Search camps.ca for {activity_query} camps]({search_url})"
+        )
+
+    # ── Case 3: Unrecognised activity ────────────────────────────────────────
+    if activity_query and not is_recognised_activity:
+        loc_hint = loc or 'Canada'
+        return (
+            f"I'm not sure what **'{activity_query}'** means as a camp activity. "
+            f"To find the right camps in {loc_hint}, could you tell me more?\n\n"
+            f"For example:\n"
+            f"- Is it a **sport**? *(e.g. basketball, swimming, hockey, gymnastics)*\n"
+            f"- An **art or creative** program? *(e.g. drama, painting, music, dance)*\n"
+            f"- A **STEM / tech** program? *(e.g. coding, robotics, science)*\n"
+            f"- An **outdoor / adventure** program? *(e.g. wilderness, rock climbing)*\n\n"
+            f"*The more specific you are, the better I can match!*"
+        )
+
+    # ── Case 4: No activity, location returned nothing ───────────────────────
+    if loc and not activity_query:
+        return (
+            f"I couldn't find camps in **{loc}** matching your criteria.\n\n"
+            f"To help me search better, could you tell me:\n\n"
+            f"- **What activity** is your child interested in? "
+            f"*(e.g. hockey, art, science, swimming)*\n"
+            f"- **How old** is your child?\n"
+            f"- Would a nearby area work too?\n\n"
+            f"*Tell me more and I'll search again!*"
+        )
+
+    # ── Case 5: Generic fallback — show current filters, ask which to change ─
+    return (
+        "I couldn't find camps matching all your criteria. "
+        "Let's try a different approach!\n\n"
+        f"Here's what I searched for:\n"
+        f"- **Activity**: {activity_query or 'not specified'}\n"
+        f"- **Location**: {loc or 'anywhere in Canada'}\n"
+        f"- **Age**: {age or 'any age'}\n"
+        f"- **Style**: {style or 'any style'}\n\n"
+        "*Which of these would you like to change?*"
+    )
+
+
 def process_query(user_text, config, client_camps, chat_history=None, last_filters=None):
     """Main RAG pipeline — Gemini extracts filters, SQL fetches camps, Gemini writes response"""
     import time
@@ -1848,36 +2086,49 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # This handles "AI camps in Mississauga" where no AI camp is local but semantic
     # can find the closest matches from the broader fallback pool.
     if _activity_has_codes and is_activity_fallback:
-        # ── HARD GATE (Architecture principle P1) ──────────────────────────────
+        # -- HARD GATE + TWO-PASS MERGE -----------------------------------------------
         # Specialty code SQL fired but fell back because no local matches existed.
-        # The camps in raw_deduped come from the province/global pool — they are
-        # NOT confirmed specialty matches. Assigning them _semantic_score=0.9 as
-        # if they passed the specialty gate would violate "eligibility before
-        # relevance": irrelevant camps would rank as confirmed AI/hockey/dance camps.
+        # The fallback pool (province_only/no_match) was fetched with limit=20
+        # and has NO activity filtering -- too small for meaningful semantic scoring.
         #
-        # Fix: clear the codes flag so semantic re-ranking runs on the fallback pool,
-        # surfacing any camps that are genuinely relevant by topic similarity.
+        # Two-pass merge strategy:
+        #   Pass 1 (already done): SQL with specialty codes -- confirmed matches
+        #          (none found in this area, hence the fallback)
+        #   Pass 2 (now):  Re-fetch with limit=200 for a proper semantic pool.
+        #          Semantic scoring will surface any camps that mention this
+        #          activity in their descriptions even without the right code.
         _tracer_log(
             f"HARD GATE: codes=True but fallback={fallback!r}. "
-            f"Fallback pool is NOT specialty-matched. "
-            f"Clearing codes flag → routing to semantic re-ranking."
+            f"Re-fetching with limit=200 for semantic merge."
         )
+        _activity_originally_had_codes = True
         _activity_has_codes = False
+
+        # Re-fetch: same filters but without activity codes, larger pool
+        _merge_filters = {k: v for k, v in filters.items()}
+        _merge_filters['activity'] = None  # drop activity so SQL returns everything
+        _merge_camps, _, _, _, _ = search_camps(
+            _merge_filters, config, limit=200, engine=_search_engine
+        )
+        if _merge_camps:
+            raw_deduped = dedupe_camps(_merge_camps)
+            _tracer_log(f"HARD GATE merge: re-fetched {len(raw_deduped)} camps for semantic scoring")
+    else:
+        _activity_originally_had_codes = _activity_has_codes
 
     if not raw_deduped:
         elapsed = time.time() - start
-        loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-        if activity_searched:
-            search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp(activity_searched + ' camps')}"
-            return (
-                f"I couldn't find **{activity_searched} camps** in {loc_hint} in our verified member network.\n\n"
-                f"Try a broader location, or search our full directory:\n"
-                f"🔍 [Search camps.ca for {activity_searched} camps]({search_url})\n\n"
-                f"💬 *Want me to search all of Ontario, or try a different activity?*"
-            ), elapsed, filters
-        return (
-            "I couldn't find any camps matching those criteria in our verified member network. "
-            "Try broadening your search — remove a filter or ask me to widen the location."
+        _is_known = bool(activity_searched) and (
+            activity_searched.lower() in SEMANTIC_ONLY_ACTIVITIES
+            or _activity_originally_had_codes
+        )
+        _tracer_log(
+            f"NO RESULTS (pre-semantic): activity='{activity_searched}' "
+            f"recognised={_is_known} fallback={fallback}"
+        )
+        _diag = _diagnose_availability(activity_searched, filters, _search_engine, config)
+        return _build_no_results_response(
+            activity_searched, filters, _is_known, fallback, diagnosis=_diag
         ), elapsed, filters
 
     # ── Activity ranking: specialty codes first, semantic for the long tail ──────
@@ -2011,63 +2262,54 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         # area actually offer that activity.  Use a slightly lower bar and a
         # different, location-aware message.
         TAXONOMY_CONFIDENCE_THRESHOLD = 0.80
-        _act_is_taxonomy = activity_query.lower() in SEMANTIC_ONLY_ACTIVITIES
+        # Activity is "recognised" if it's in the semantic-only taxonomy OR
+        # if it had SQL specialty codes (even if HARD GATE cleared the flag
+        # because no local matches existed).  Recognised activities get the
+        # location-aware "not found" message, NOT "I'm not familiar with...".
+        _act_is_taxonomy = (
+            activity_query.lower() in SEMANTIC_ONLY_ACTIVITIES
+            or _activity_originally_had_codes
+        )
 
         if raw_deduped:
             _max_sem = max(c.get('_semantic_score', 0) for c in raw_deduped)
 
             if _act_is_taxonomy and _max_sem < TAXONOMY_CONFIDENCE_THRESHOLD:
-                # Recognised activity, but no camps in this area match it
                 elapsed = time.time() - start
-                loc_hint = filters.get('region') or filters.get('province') or 'Canada'
                 _tracer_log(
                     f"LOW-CONFIDENCE GATE (taxonomy): activity='{activity_query}' "
                     f"max_semantic={_max_sem:.4f} < {TAXONOMY_CONFIDENCE_THRESHOLD} "
-                    f"-> no matching camps in {loc_hint}"
+                    f"-> no matching camps"
                 )
-                from urllib.parse import quote_plus as _qp_tax
-                search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp_tax(activity_query + ' camps')}"
-                return (
-                    f"I couldn't find any **{activity_query} camps** in {loc_hint} "
-                    f"in our verified member network.\n\n"
-                    f"Here are a few things you can try:\n\n"
-                    f"- **Broaden your search area** -- try a nearby city or province\n"
-                    f"- **Try a related activity** -- I can search for similar programs\n"
-                    f"- [Search camps.ca for {activity_query} camps]({search_url})\n\n"
-                    f"*Just tell me what to try and I'll search again!*"
+                _diag = _diagnose_availability(activity_query, filters, _search_engine, config)
+                return _build_no_results_response(
+                    activity_query, filters, True, fallback, diagnosis=_diag
                 ), elapsed, filters
+
 
             elif not _act_is_taxonomy and _max_sem < LOW_CONFIDENCE_THRESHOLD:
                 elapsed = time.time() - start
                 _tracer_log(
                     f"LOW-CONFIDENCE GATE: activity='{activity_query}' "
                     f"max_semantic={_max_sem:.4f} < {LOW_CONFIDENCE_THRESHOLD} "
-                    f"→ clarifying question (not a taxonomy activity)"
+                    f"-> unrecognised activity"
                 )
-                loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-                return (
-                    'I want to make sure I find the right camps for you! '
-                    f"I'm not familiar with **'{activity_query}'** as a camp activity.\n\n"
-                    f"Could you help me understand what you're looking for? For example:\n\n"
-                    '- Did you mean a specific sport, art, or skill? '
-                    '*(e.g. swimming, coding, music, rock climbing)*\n'
-                    '- Are you looking for a science or nature program? '
-                    '*(e.g. animals, marine biology, space)*\n'
-                    '- Or something else entirely?\n\n'
-                    f"*Tell me more and I'll search our verified member camps in {loc_hint}!*"
+                return _build_no_results_response(
+                    activity_query, filters, False, fallback
                 ), elapsed, filters
+
 
         if not raw_deduped:
             elapsed = time.time() - start
-            loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-            from urllib.parse import quote_plus as _qp2
-            search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp2(activity_query + ' camps')}"
-            return (
-                f"I couldn't find **{activity_query} camps** in {loc_hint} in our verified network.\n\n"
-                f"Try searching our full directory:\n"
-                f"🔍 [Search camps.ca for {activity_query} camps]({search_url})\n\n"
-                f"💬 *Or tell me a different activity or location and I'll search again.*"
+            _tracer_log(
+                f"NO RESULTS (post-semantic): activity='{activity_query}' "
+                f"all camps eliminated by elbow detection"
+            )
+            _diag = _diagnose_availability(activity_query, filters, _search_engine, config)
+            return _build_no_results_response(
+                activity_query, filters, _act_is_taxonomy, fallback, diagnosis=_diag
             ), elapsed, filters
+
 
     elif not code_match_used:
         for c in raw_deduped:
