@@ -1820,8 +1820,40 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         _tracer_log("process_query: activity negation detected — clearing last_filters")
         last_filters = None
 
-    affirmatives = ['sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please']
-    is_affirmative = text_lower_check.rstrip('!.') in affirmatives
+    affirmatives = [
+        'sure', 'yes', 'ok', 'okay', 'show me', 'show more', 'more', 'yep', 'please',
+        'yeah', 'ya', 'yup', 'go ahead', 'do it', 'sure thing', 'absolutely',
+        'yes please', 'yes, please', 'yes please show', 'yes, please show',
+        'yes show me', 'please show', 'please show me', 'show me please',
+        'yes, show me', 'yep please', 'yeah please', 'ok show me',
+    ]
+    is_affirmative = text_lower_check.rstrip("!.,") in affirmatives
+
+    # -- Detect location suggestion from AI last message -----------------------
+    # If AI said "I found X camps in: **Toronto** (N camps). Search there?"
+    # or "Want me to search all of Ontario?", capture those suggestions
+    # so a "yes" response applies them instead of re-running the same search.
+    import re as _re_loc
+    _suggested_region = None
+    _suggested_province = None
+    if last_assistant_msg:
+        # Pattern 1: "I found X camps in: **Region1** (N camp)"
+        _region_matches = _re_loc.findall(
+            r"\*\*([A-Z][A-Za-z\s\-\.]+?)\*\*\s*\(\d+\s+camp",
+            last_assistant_msg
+        )
+        if _region_matches:
+            _suggested_region = _region_matches[0].strip()
+            _tracer_log(f"process_query: AI suggested region='{_suggested_region}'")
+
+        # Pattern 2: "Want me to search all of PROVINCE?"
+        _prov_match = _re_loc.search(
+            r"search all of\s+\*?\*?([A-Z][A-Za-z\s]+?)\*?\*?\s*\?",
+            last_assistant_msg
+        )
+        if _prov_match and not _suggested_region:
+            _suggested_province = _prov_match.group(1).strip()
+            _tracer_log(f"process_query: AI suggested province='{_suggested_province}'")
 
     # Purely additive refinement phrases
     refinement_only_phrases = [
@@ -1908,9 +1940,18 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # REUSE  — pure affirmative ("yes", "sure", "ok")
 
     if is_affirmative and last_filters:
-        # Pure yes/sure — reuse last filters exactly
+        # Pure yes/sure — reuse last filters, but apply AI's location suggestion if any
         filters = {k: v for k, v in last_filters.items()
                    if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
+
+        # If AI suggested a different location and user said yes, apply it
+        if _suggested_region:
+            filters['region'] = _suggested_region
+            _tracer_log(f"process_query: REUSE + applying suggested region='{_suggested_region}'")
+        elif _suggested_province:
+            filters['province'] = _suggested_province
+            filters['region'] = None  # clear region to search whole province
+            _tracer_log(f"process_query: REUSE + applying suggested province='{_suggested_province}'")
 
     elif (not last_filters or
           new_signal_count >= 2 or
