@@ -1933,12 +1933,39 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         # NOTE: SEMANTIC_ONLY_ACTIVITIES bypass this gate — they are recognised
         # taxonomy items and their semantic scores are expected to be meaningful.
         LOW_CONFIDENCE_THRESHOLD = 0.855
-        # activity_query already normalised (e.g. "puppy"->"animals")
-        # so taxonomy items correctly bypass this gate
+        # Taxonomy items (SEMANTIC_ONLY_ACTIVITIES) are recognised activities,
+        # so they don't get the "I'm not familiar with..." message.  However,
+        # they can still produce poor semantic matches when no camps in the
+        # area actually offer that activity.  Use a slightly lower bar and a
+        # different, location-aware message.
+        TAXONOMY_CONFIDENCE_THRESHOLD = 0.80
         _act_is_taxonomy = activity_query.lower() in SEMANTIC_ONLY_ACTIVITIES
-        if raw_deduped and not _act_is_taxonomy:
+
+        if raw_deduped:
             _max_sem = max(c.get('_semantic_score', 0) for c in raw_deduped)
-            if _max_sem < LOW_CONFIDENCE_THRESHOLD:
+
+            if _act_is_taxonomy and _max_sem < TAXONOMY_CONFIDENCE_THRESHOLD:
+                # Recognised activity, but no camps in this area match it
+                elapsed = time.time() - start
+                loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+                _tracer_log(
+                    f"LOW-CONFIDENCE GATE (taxonomy): activity='{activity_query}' "
+                    f"max_semantic={_max_sem:.4f} < {TAXONOMY_CONFIDENCE_THRESHOLD} "
+                    f"-> no matching camps in {loc_hint}"
+                )
+                from urllib.parse import quote_plus as _qp_tax
+                search_url = f"https://www.camps.ca/camp-site-search.php?keywrds={_qp_tax(activity_query + ' camps')}"
+                return (
+                    f"I couldn't find any **{activity_query} camps** in {loc_hint} "
+                    f"in our verified member network.\n\n"
+                    f"Here are a few things you can try:\n\n"
+                    f"- **Broaden your search area** -- try a nearby city or province\n"
+                    f"- **Try a related activity** -- I can search for similar programs\n"
+                    f"- [Search camps.ca for {activity_query} camps]({search_url})\n\n"
+                    f"*Just tell me what to try and I'll search again!*"
+                ), elapsed, filters
+
+            elif not _act_is_taxonomy and _max_sem < LOW_CONFIDENCE_THRESHOLD:
                 elapsed = time.time() - start
                 _tracer_log(
                     f"LOW-CONFIDENCE GATE: activity='{activity_query}' "
