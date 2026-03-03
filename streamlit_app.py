@@ -2248,12 +2248,83 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     # ── Known activity: SQL already filtered by specialty code ──────────────────
     # If SQL used specialty codes, camps in raw_deduped are confirmed matches.
-    # Give them high semantic scores and skip semantic search.
-    code_match_used = _activity_has_codes  # set during SQL build phase
+    #
+    # HYBRID SCORING for broad parent codes:
+    # Some codes cover an entire category (e.g. code 22 = all dance, code 37 = all music).
+    # When the user searches a *specific* sub-activity (e.g. "ballet" not "dance"),
+    # we need semantic scoring WITHIN the SQL results to rank ballet-specific camps
+    # above generic hip-hop or jazz camps. Without this, all dance camps get 90%.
+    #
+    # For specific codes (e.g. code 29 = hockey only), the flat 0.9 is fine.
+    BROAD_PARENT_CODES = {
+        22: 'dance',       # covers: ballet, hip hop, jazz, tap, contemporary, lyrical, breakdancing, etc.
+        37: 'music',       # covers: guitar, piano, drums, singing, DJing, songwriting, etc.
+        59: 'theatre',     # covers: acting, musical theatre, playwriting, set design, etc.
+    }
+    # Activities that ARE the broad category (no refinement needed)
+    _broad_category_names = set(BROAD_PARENT_CODES.values()) | {
+        'performing arts', 'visual arts',  # additional umbrella names
+    }
 
-    if code_match_used:
+    code_match_used = _activity_has_codes  # set during SQL build phase
+    _needs_semantic_refinement = False
+
+    if code_match_used and activity_query:
+        _aq = activity_query.lower().strip()
+        # Check if the user's query is a SUB-ACTIVITY of a broad parent code
+        # If so, run semantic on the SQL results to differentiate
+        if _aq not in _broad_category_names:
+            # Look up which codes were used for this activity
+            _used_codes = set()
+            for _camp in raw_deduped:
+                # The SQL used specialty codes — check if any are broad parents
+                pass
+            # Simpler check: does the activity map to a code that's a broad parent?
+            _ACTIVITY_CODES_CHECK = {
+                'ballet': [22], 'hip hop': [22], 'jazz dance': [22],
+                'breakdancing': [22], 'tap dance': [22], 'acro dance': [22],
+                'contemporary': [22], 'lyrical': [22], 'modern': [22],
+                'technique': [22], 'preschool dance': [22],
+                'guitar': [37], 'piano': [37], 'drums': [37], 'percussion': [37],
+                'singing': [37], 'vocal': [37], 'songwriting': [37], 'djing': [37],
+                'glee': [37], 'jam camp': [37], 'string': [37],
+                'vocal training': [37], 'music recording': [37],
+                'acting': [59], 'musical theatre': [59, 37], 'drama': [59],
+                'playwriting': [59], 'set and costume design': [59],
+            }
+            _mapped_codes = _ACTIVITY_CODES_CHECK.get(_aq, [])
+            if any(c in BROAD_PARENT_CODES for c in _mapped_codes):
+                _needs_semantic_refinement = True
+                _tracer_log(
+                    f"BROAD-CODE REFINEMENT: '{_aq}' maps to broad parent code(s) "
+                    f"{_mapped_codes}. Running semantic within SQL results."
+                )
+
+    if code_match_used and not _needs_semantic_refinement:
         for c in raw_deduped:
-            c['_semantic_score'] = 0.9  # confirmed specialty match
+            c['_semantic_score'] = 0.9  # confirmed specialty match — code is specific
+
+    elif code_match_used and _needs_semantic_refinement:
+        # Hybrid: SQL narrowed to the right category, now semantic ranks within it
+        if activity_query and embeddings_are_ready(_search_engine):
+            raw_deduped = semantic_score_camps(
+                raw_deduped, activity_query, config['GEMINI_API_KEY'], _search_engine
+            )
+            # Boost: these camps ARE in the right category (SQL confirmed), so
+            # give a floor boost to prevent them from scoring lower than random
+            # non-category camps would. But respect the relative ranking.
+            for c in raw_deduped:
+                raw_sem = c.get('_semantic_score', 0.5)
+                # Blend: 70% semantic (for specificity) + 30% category confirmation (0.9)
+                c['_semantic_score'] = 0.7 * raw_sem + 0.3 * 0.9
+            _tracer_log(
+                f"BROAD-CODE REFINEMENT: semantic scored {len(raw_deduped)} camps, "
+                f"scores blended with category confirmation"
+            )
+        else:
+            # Fallback: no embeddings available, use flat 0.9
+            for c in raw_deduped:
+                c['_semantic_score'] = 0.9
 
     # ── Semantic search (long-tail activities with no code match) ─────────────
     if not code_match_used and activity_query and embeddings_are_ready(_search_engine):
