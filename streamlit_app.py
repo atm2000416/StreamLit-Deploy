@@ -1398,7 +1398,7 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
         camp_style= 'Overnight Camp' if c.get('camp_style') == 'overnight' else 'Day Camp'
 
         age_display  = f"Ages {age_min}–{age_max}" if age_min and age_max else "Ages vary"
-        cost_display = f"\${cost_min:,}–\${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
+        cost_display = (f'${cost_min:,}–${cost_max:,}/week' if cost_min and cost_max else 'Contact for pricing')
 
         blurb = blurbs.get(i, '')
         why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
@@ -1841,9 +1841,10 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                     f"→ clarifying question (not a taxonomy activity)"
                 )
                 loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+                _act_q = activity_query
                 return (
                     f"I want to make sure I find the right camps for you! "
-                    f"I'm not familiar with **"{activity_query}"** as a camp activity.\n\n"
+                    f"I'm not familiar with **'{_act_q}'** as a camp activity.\n\n"
                     f"Could you help me understand what you're looking for? For example:\n\n"
                     f"- Did you mean a specific sport, art, or skill? "
                     f"*(e.g. swimming, coding, music, rock climbing)*\n"
