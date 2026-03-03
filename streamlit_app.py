@@ -19,7 +19,7 @@ import time
 # ═════════════════════════════════════════════
 
 def _tracer_log(msg: str):
-    """Append timestamped entry to in-session tracer log. No-op when tracer is off."""
+    """Session-scoped debug logger. No-op when tracer toggle is off."""
     import streamlit as _st2, time as _t2
     if not _st2.session_state.get('_tracer_on', False):
         return
@@ -182,7 +182,12 @@ _GENERATE_MODEL_CACHE: str | None = None
 
 
 def _get_generate_model(api_key: str) -> str | None:
-    """Discover best available generateContent model via ListModels. Cached per session."""
+    """
+    Discover best available generateContent model via ListModels.
+    Filters out specialty models (TTS, image-gen, robotics, etc.).
+    Prefers gemini-2.x-flash; falls back to any flash, then anything.
+    Cached per session.
+    """
     global _GENERATE_MODEL_CACHE
     if _GENERATE_MODEL_CACHE:
         return _GENERATE_MODEL_CACHE
@@ -192,27 +197,25 @@ def _get_generate_model(api_key: str) -> str | None:
         resp = _req.get(f"{BASE}/models?key={api_key}", timeout=10)
         if resp.ok:
             all_models = resp.json().get("models", [])
+            # Filter to text-only generateContent models
             gen_models = [
                 m["name"] for m in all_models
                 if "generateContent" in m.get("supportedGenerationMethods", [])
-                and "embedding" not in m["name"].lower()
-                and "aqa" not in m["name"].lower()
-                and "tts" not in m["name"].lower()
-                and "image" not in m["name"].lower()
-                and "robotics" not in m["name"].lower()
-                and "computer-use" not in m["name"].lower()
-                and "research" not in m["name"].lower()
+                and not any(x in m["name"].lower() for x in [
+                    "embedding", "aqa", "tts", "image", "robotics",
+                    "computer-use", "research", "vision"
+                ])
             ]
-            _tracer_log(f"_get_generate_model: {len(gen_models)} candidates: {gen_models[:8]}")
+            _tracer_log(f"_get_generate_model: {len(gen_models)} candidates: {gen_models[:6]}")
             if gen_models:
-                # Prefer gemini-2.x-flash, then gemini-flash-latest, then anything flash
                 def _rank(name):
                     n = name.lower()
                     if "gemini-2" in n and "flash" in n and "lite" not in n: return 0
-                    if "gemini-flash-latest" in n: return 1
-                    if "flash" in n and "lite" not in n: return 2
+                    if "gemini-2" in n and "flash" in n: return 1
+                    if "gemini-flash-latest" in n: return 2
                     if "flash" in n: return 3
-                    return 4
+                    if "gemini" in n: return 4
+                    return 5
                 gen_models.sort(key=_rank)
                 _GENERATE_MODEL_CACHE = gen_models[0]
                 _tracer_log(f"_get_generate_model: selected {_GENERATE_MODEL_CACHE}")
@@ -224,7 +227,12 @@ def _get_generate_model(api_key: str) -> str | None:
 
 
 def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
-    """Call Gemini generateContent — model auto-discovered from ListModels."""
+    """
+    Call Gemini generateContent API.
+    Model auto-discovered via ListModels — works across any API key tier.
+    Thinking/reasoning tokens disabled via thinkingConfig to prevent token
+    budget exhaustion on short-output calls (filter extraction, closing questions).
+    """
     import requests
     import streamlit as _st
 
@@ -236,10 +244,16 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
         return ""
 
     _tracer_log(f"call_gemini: model={model} max_tokens={max_tokens}")
+
+    # Disable thinking tokens on 2.5 models to prevent budget exhaustion.
+    # Thinking is unnecessary for structured JSON extraction and short blurbs.
+    use_thinking = False
+    thinking_cfg = {"thinkingConfig": {"thinkingBudget": 0}} if not use_thinking else {}
+
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens, **thinking_cfg}
     }
     try:
         resp = requests.post(
@@ -263,7 +277,7 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
             return ""
         else:
             global _GENERATE_MODEL_CACHE
-            _GENERATE_MODEL_CACHE = None   # clear so next call rediscovers
+            _GENERATE_MODEL_CACHE = None
             msg = f"{model} HTTP {resp.status_code}: {resp.text[:300]}"
             _tracer_log(f"call_gemini: FAILED {msg}")
             _st.session_state['_gemini_error'] = msg
@@ -515,7 +529,7 @@ Examples:
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
     _tracer_log(f"extract_filters: '{user_text[:80]}'")
-    result = call_gemini(system, user_text, api_key, max_tokens=200)
+    result = call_gemini(system, user_text, api_key, max_tokens=400)
     _tracer_log(f"extract_filters: raw='{result[:120] if result else 'EMPTY'}'")
     import json, re
     try:
@@ -587,10 +601,34 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         params['province'] = province
 
     if resolved_region:
-        # Search city column first (exact source of truth), then region name
-        conditions.append("(sc.city LIKE :city OR sc.region LIKE :region)")
-        params['city']   = f"%{resolved_region}%"
-        params['region'] = f"%{resolved_region}%"
+        # GTA suburb → DB region alias map.
+        # sessions_clean.region stores "Halton - Peel", not "Mississauga" etc.
+        # When a known suburb is searched, expand to also match the DB region name.
+        _GTA_REGION_ALIASES = {
+            'mississauga': 'halton - peel', 'brampton': 'halton - peel',
+            'oakville': 'halton - peel',    'burlington': 'halton - peel',
+            'milton': 'halton - peel',      'caledon': 'halton - peel',
+            'markham': 'york region',       'vaughan': 'york region',
+            'richmond hill': 'york region', 'aurora': 'york region',
+            'newmarket': 'york region',     'thornhill': 'york region',
+            'pickering': 'durham',          'ajax': 'durham',
+            'whitby': 'durham',             'oshawa': 'durham',
+            'etobicoke': 'toronto',         'scarborough': 'toronto',
+            'north york': 'toronto',        'east york': 'toronto',
+        }
+        _region_alias = _GTA_REGION_ALIASES.get(resolved_region.lower())
+        if _region_alias:
+            # Match city OR original region name OR DB region alias
+            conditions.append("(sc.city LIKE :city OR sc.region LIKE :region OR sc.region LIKE :region_alias)")
+            params['city']         = f"%{resolved_region}%"
+            params['region']       = f"%{resolved_region}%"
+            params['region_alias'] = f"%{_region_alias}%"
+            _tracer_log(f"search_camps: GTA alias '{resolved_region}' → also matching region LIKE '%{_region_alias}%'")
+        else:
+            # Search city column first (exact source of truth), then region name
+            conditions.append("(sc.city LIKE :city OR sc.region LIKE :region)")
+            params['city']   = f"%{resolved_region}%"
+            params['region'] = f"%{resolved_region}%"
 
     # Activity: specialty codes go back into SQL for known activities (exact match).
     # Unknown activities (no codes) → SQL returns all, semantic ranking applied after.
@@ -1068,7 +1106,7 @@ def build_camp_url(c):
 
 def generate_blurbs(deduped, user_text, api_key):
     """Single Gemini call: given N camps, return N one-sentence Why-it-fits blurbs."""
-    # Cap at 15 camps to stay within token budget for any model
+    # Cap at 15 to stay within token budget across all model tiers
     blurb_camps = deduped[:15]
     camp_snippets = []
     for i, c in enumerate(blurb_camps, 1):
@@ -1083,9 +1121,9 @@ def generate_blurbs(deduped, user_text, api_key):
 
     system = (
         "You are a Canadian camp consultant. "
-        "For each numbered camp write ONE sentence (max 20 words) on why it fits. "
+        "For each numbered camp write ONE sentence (max 20 words) on why it fits the search. "
         "Be specific — name the program or a standout detail. Stay positive. "
-        "Reply ONLY in this format, one line per camp:\n"
+        "Reply ONLY in this exact format, one line per camp:\n"
         "1: <blurb>\n2: <blurb>\n..."
     )
     user_prompt = f"Search: {user_text}\n\n" + "\n\n".join(camp_snippets)
@@ -1225,13 +1263,13 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     if is_hard_reset:
         last_filters = None   # wipe context so decision tree treats this as fresh
 
-    # Hard-reset phrases — wipe last_filters so decision tree treats as fresh
+    # Hard-reset phrases — wipe last_filters so decision tree starts fresh
     fresh_search_phrases = [
         'new search', 'start over', 'start fresh', 'reset', 'forget everything',
         'different search', 'never mind', 'nevermind', 'scratch that',
     ]
     if any(p in text_lower_check for p in fresh_search_phrases):
-        _tracer_log("process_query: hard reset detected — clearing last_filters")
+        _tracer_log("process_query: hard reset — clearing last_filters")
         last_filters = None
 
     # Pure single-word affirmatives — no new info, reuse filters wholesale
@@ -1270,6 +1308,32 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         "how about ", "didn't you", "did you miss",
     ]
     is_correction = any(p in text_lower_check for p in correction_patterns)
+
+    # Detect full-sentence activity negations:
+    # "these are not rock climbing camps", "those aren't hockey camps", etc.
+    # These mean: the user is REJECTING the current results as the wrong activity.
+    # Action: treat as a fresh search — do NOT inherit last activity.
+    import re as _re_neg
+    _negation_activity_patterns = [
+        r"these are not\s+\w",
+        r"those are not\s+\w",
+        r"these aren.t\s+\w",
+        r"those aren.t\s+\w",
+        r"not\s+\w+\s+camps",
+        r"not looking for\s+\w+\s+camps",
+        r"don.t want\s+\w+\s+camps",
+        r"wrong\s+(activity|camps|sport|type)",
+        r"completely (different|wrong|off)",
+    ]
+    is_activity_negation = any(
+        _re_neg.search(p, text_lower_check)
+        for p in _negation_activity_patterns
+    )
+    if is_activity_negation:
+        _tracer_log(f"process_query: activity negation detected — will strip inherited activity")
+        # Force a fresh search by clearing last_filters activity
+        # (the new filters will be extracted from the rest of the message)
+        last_filters = None
 
     # If this is a correction, try to extract any camp name mentioned in the message
     # e.g. "isn't Teen Ranch overnight too?" → named_camp_override = "Teen Ranch"
@@ -1467,10 +1531,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     # This handles "AI camps in Mississauga" where no AI camp is local but semantic
     # can find the closest matches from the broader fallback pool.
     if _activity_has_codes and is_activity_fallback:
-        # Fallback fired despite specialty codes — camps returned are NOT
-        # specialty matches (they're province/global pool). Clear code flag
-        # so semantic ranking runs below instead of assigning score=0.9.
-        _tracer_log(f"process_query: activity fallback detected (fallback={fallback}), clearing code match flag → semantic will rank")
+        _tracer_log(f"process_query: activity fallback (fallback={fallback}), clearing codes flag → semantic")
         _activity_has_codes = False
 
     if not raw_deduped:
@@ -1588,7 +1649,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
     # Closing question — one Gemini sentence or hardcoded fallback
     closing_system = "You are a camp consultant. Write ONE short friendly question (max 12 words, ending with ?) to help the user narrow down their camp search. No preamble."
-    closing_q = call_gemini(closing_system, f"User searched: {user_text}. Filters: {filters}", config["GEMINI_API_KEY"], max_tokens=40)
+    closing_q = call_gemini(closing_system, f"User searched: {user_text}. Filters: {filters}", config["GEMINI_API_KEY"], max_tokens=100)
     if not closing_q or '?' not in closing_q:
         closing_q = "Want me to filter by age range, cost, or specific activities?"
 
@@ -1971,7 +2032,6 @@ if missing:
 with st.spinner("Loading member camps..."):
     client_camps = load_client_camps(config)
 
-# Surface Gemini errors prominently if all models failed
 if st.session_state.get('_gemini_error'):
     st.warning(f"⚠️ Gemini API error: `{st.session_state['_gemini_error']}`")
 
@@ -2022,30 +2082,27 @@ def _show_embedding_admin(config):
                     m["name"] for m in _models
                     if "embedContent" in m.get("supportedGenerationMethods", [])
                 ]
-                # ── generateContent models ───────────────────────────
+                # ── generateContent models (filter extraction + blurbs) ──
                 _gen_models = [
                     m["name"] for m in _models
                     if "generateContent" in m.get("supportedGenerationMethods", [])
-                    and "embedding" not in m["name"].lower()
-                    and "aqa" not in m["name"].lower()
-                    and "tts" not in m["name"].lower()
-                    and "image" not in m["name"].lower()
-                    and "robotics" not in m["name"].lower()
-                    and "computer-use" not in m["name"].lower()
-                    and "research" not in m["name"].lower()
+                    and not any(x in m["name"].lower() for x in [
+                        "embedding", "aqa", "tts", "image", "robotics",
+                        "computer-use", "research", "vision"
+                    ])
                 ]
                 st.markdown("**🤖 generateContent models (filter extraction + blurbs):**")
                 if _gen_models:
                     for _m in _gen_models:
                         st.code(_m)
                     _gen_best = _gen_models[0]
-                    st.write(f"Live-testing `{_gen_best}`...")
+                    st.write(f"Live-testing `{_gen_best}` with thinking disabled...")
                     _gen_test = _tr.post(
                         f"https://generativelanguage.googleapis.com/v1beta/{_gen_best}:generateContent",
                         headers={"Content-Type": "application/json", "x-goog-api-key": _api_key},
                         json={
                             "contents": [{"role": "user", "parts": [{"text": "Reply with the single word: WORKING"}]}],
-                            "generationConfig": {"temperature": 0, "maxOutputTokens": 20}
+                            "generationConfig": {"temperature": 0, "maxOutputTokens": 20, "thinkingConfig": {"thinkingBudget": 0}}
                         },
                         timeout=15
                     )
@@ -2055,15 +2112,18 @@ def _show_embedding_admin(config):
                         _gt = _gp[0].get("text", "").strip() if _gp else ""
                         _gf = (_gd.get("candidates") or [{}])[0].get("finishReason", "?")
                         if _gt:
-                            st.success(f"✅ generateContent working — replied: '{_gt}'")
+                            st.success(f"✅ generateContent working — replied: '{_gt}' (finishReason={_gf})")
                         else:
-                            st.warning(f"⚠️ Empty reply (finishReason={_gf}) — safety block or quota issue")
+                            st.warning(f"⚠️ Empty reply (finishReason={_gf}) — may be safety block")
                     else:
-                        st.error(f"❌ generateContent FAILED {_gen_test.status_code}: {_gen_test.text[:300]}")
+                        st.error(f"❌ FAILED {_gen_test.status_code}: {_gen_test.text[:300]}")
                 else:
-                    st.error("❌ NO generateContent models for this API key!")
+                    st.error("❌ No generateContent models for this API key!")
+                    st.write("All models:")
+                    for _m in _models[:15]:
+                        st.code(f"{_m['name']}: {_m.get('supportedGenerationMethods', [])}")
 
-                # ── Embedding models ─────────────────────────────────
+                # ── Embedding models ─────────────────────────────────────
                 st.markdown("**🔢 Embedding models (semantic search):**")
                 if _embed_models:
                     for _m in _embed_models:
@@ -2082,7 +2142,7 @@ def _show_embedding_admin(config):
                     else:
                         st.error(f"embedContent failed: {_test_resp.text[:300]}")
                 else:
-                    st.error("No embedding models available for this API key")
+                    st.error("No embedding models available")
             else:
                 st.error(f"ListModels failed {_list_resp.status_code}: {_list_resp.text[:300]}")
         except Exception as _te:
