@@ -1,0 +1,38 @@
+{
+
+  "permissions": {
+
+    "allow": [
+
+      "Bash(python3 -c*)",
+
+      "Bash(grep*)",
+
+      "Bash(wc*)",
+
+      "Bash(cat*)"
+
+    ]
+
+  },
+
+  "hooks": {
+
+    "PostToolUse": [
+
+      {
+
+        "matcher": "Write|Edit",
+
+        "command": "bash -c 'if [[ \"$TOOL_INPUT\" == *streamlit_app.py* ]]; then python3 -c \"import ast; ast.parse(open(\\\"streamlit_app.py\\\").read()); print(\\\"Syntax OK\\\")\" || echo \"SYNTAX ERROR — revert this change\"; fi'",
+
+        "description": "Auto syntax check after editing streamlit_app.py"
+
+      }
+
+    ]
+
+  }
+
+}
+
