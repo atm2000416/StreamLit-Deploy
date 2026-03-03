@@ -878,13 +878,6 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         # Adventure (no confirmed code)
         'military', 'ropes course', 'travel',
     }
-    # If activity resolves to a semantic-only item: skip SQL code lookup,
-    # set _activity_has_codes=False, proceed directly to semantic scoring.
-    if activity:
-        _sem_only_check = _ACTIVITY_ALIASES.get(activity.lower().strip(), activity.lower().strip())
-        if _sem_only_check in SEMANTIC_ONLY_ACTIVITIES:
-            _tracer_log(f"search_camps: '{activity}' → semantic-only (valid taxonomy, no DB code)")
-            _activity_has_codes = False
     # Location/region codes leaked into specialty column — exclude from all activity filters
     LOCATION_CODES_SQL = {288, 150, 347, 170, 81, 256, 130, 11, 135, 176, 287, 315, 317,
                           318, 342, 347}
@@ -958,7 +951,12 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
 
     if activity:
         act_lower_sql = _ACTIVITY_ALIASES.get(activity.lower().strip(), activity.lower().strip())
-        sql_codes = ACTIVITY_CODES_SQL.get(act_lower_sql, [])
+        # Skip SQL code lookup for valid taxonomy items (route to semantic search)
+        if act_lower_sql in SEMANTIC_ONLY_ACTIVITIES:
+            _tracer_log(f"search_camps: '{activity}' → '{act_lower_sql}' is semantic-only — skipping SQL codes")
+            sql_codes = []
+        else:
+            sql_codes = ACTIVITY_CODES_SQL.get(act_lower_sql, [])
         sql_codes = [c for c in sql_codes
                      if c not in GENERIC_CODES_SQL and c not in LOCATION_CODES_SQL] or sql_codes
         if sql_codes:
@@ -1398,7 +1396,8 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
         camp_style= 'Overnight Camp' if c.get('camp_style') == 'overnight' else 'Day Camp'
 
         age_display  = f"Ages {age_min}–{age_max}" if age_min and age_max else "Ages vary"
-        cost_display = (f'${cost_min:,}–${cost_max:,}/week' if cost_min and cost_max else 'Contact for pricing')
+        _cur = '$'
+        cost_display = (_cur + f'{cost_min:,}' + '–' + _cur + f'{cost_max:,}' + '/week') if cost_min and cost_max else 'Contact for pricing'
 
         blurb = blurbs.get(i, '')
         why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
@@ -1778,6 +1777,54 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     #   and cuts there, separating signal from noise dynamically.
 
     activity_query = (filters.get('activity') or '').strip()
+    # Normalise activity_query to canonical taxonomy term before semantic search.
+    # "puppy"→"animals", "karate"→"martial arts" etc. so the embedding query
+    # finds the right camps. Mirrors _ACTIVITY_ALIASES in search_camps.
+    _PROCESS_ALIASES = {
+        'artificial intelligence': 'ai', 'machine learning': 'ai', 'a.i.': 'ai',
+        'computer science': 'coding', 'computer programming': 'coding',
+        'software': 'coding', 'app development': 'coding',
+        'horse riding': 'horseback riding',
+        'ball hockey': 'hockey', 'ice hockey': 'hockey',
+        'cheerleading': 'cheer', 'cheering': 'cheer',
+        'swimming': 'swim', 'hoops': 'basketball',
+        'karate': 'martial arts', 'taekwondo': 'martial arts',
+        'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
+        'ninja': 'ninja warrior', 'trampolining': 'trampoline',
+        'bow and arrow': 'archery', 'climbing': 'rock climbing',
+        'ski': 'skiing', 'snowboard': 'snowboarding',
+        'skate': 'skateboarding', 'bike': 'cycling', 'biking': 'cycling',
+        'angling': 'fishing', 'freerunning': 'parkour',
+        'chef': 'cooking', 'culinary': 'cooking',
+        'drama': 'theatre', 'theater': 'theatre', 'acting': 'theatre',
+        'clay': 'pottery', 'ceramics': 'pottery',
+        'carpentry': 'woodworking', 'improv': 'comedy',
+        'juggling': 'circus', 'acrobatics': 'circus', 'sketching': 'drawing',
+        'd&d': 'dungeons and dragons', 'dnd': 'dungeons and dragons',
+        'maths': 'math', 'mathematics': 'math',
+        'money': 'financial literacy', 'finance': 'financial literacy',
+        'business': 'entrepreneurship', 'startup': 'entrepreneurship',
+        'news': 'journalism',
+        'astronomy': 'space', 'planets': 'space', 'rockets': 'space',
+        'ocean': 'marine biology', 'dolphins': 'marine biology', 'sharks': 'marine biology',
+        'wildlife': 'animals', 'zoo': 'animals', 'zoology': 'animals', 'safari': 'animals',
+        # Pet/animal terms -> animals (Science taxonomy)
+        'puppy': 'animals', 'puppies': 'animals',
+        'dog': 'animals', 'dogs': 'animals',
+        'cat': 'animals', 'cats': 'animals', 'kitten': 'animals', 'kittens': 'animals',
+        'pet': 'animals', 'pets': 'animals', 'pet care': 'animals',
+        'bunny': 'animals', 'rabbit': 'animals', 'hamster': 'animals',
+        'reptile': 'animals', 'bird': 'animals', 'birds': 'animals',
+        'farm animals': 'animals', 'farm': 'animals',
+        'meditation': 'mindfulness',
+        'drone': 'drone', 'drones': 'drone', 'uav': 'drone',
+        'vr': 'virtual reality', 'website': 'web design',
+    }
+    if activity_query:
+        _norm = _PROCESS_ALIASES.get(activity_query.lower(), activity_query.lower())
+        if _norm != activity_query.lower():
+            _tracer_log(f"process_query: activity '{activity_query}' normalised to '{_norm}'")
+            activity_query = _norm
 
     # ── Known activity: SQL already filtered by specialty code ──────────────────
     # If SQL used specialty codes, camps in raw_deduped are confirmed matches.
@@ -1830,6 +1877,8 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         # NOTE: SEMANTIC_ONLY_ACTIVITIES bypass this gate — they are recognised
         # taxonomy items and their semantic scores are expected to be meaningful.
         LOW_CONFIDENCE_THRESHOLD = 0.855
+        # activity_query already normalised (e.g. "puppy"->"animals")
+        # so taxonomy items correctly bypass this gate
         _act_is_taxonomy = activity_query.lower() in SEMANTIC_ONLY_ACTIVITIES
         if raw_deduped and not _act_is_taxonomy:
             _max_sem = max(c.get('_semantic_score', 0) for c in raw_deduped)
@@ -1841,16 +1890,15 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                     f"→ clarifying question (not a taxonomy activity)"
                 )
                 loc_hint = filters.get('region') or filters.get('province') or 'Canada'
-                _act_q = activity_query
                 return (
-                    f"I want to make sure I find the right camps for you! "
-                    f"I'm not familiar with **'{_act_q}'** as a camp activity.\n\n"
+                    'I want to make sure I find the right camps for you! '
+                    f"I'm not familiar with **'{activity_query}'** as a camp activity.\n\n"
                     f"Could you help me understand what you're looking for? For example:\n\n"
-                    f"- Did you mean a specific sport, art, or skill? "
-                    f"*(e.g. swimming, coding, music, rock climbing)*\n"
-                    f"- Are you looking for a science or nature program? "
-                    f"*(e.g. animals, marine biology, space)*\n"
-                    f"- Or something else entirely?\n\n"
+                    '- Did you mean a specific sport, art, or skill? '
+                    '*(e.g. swimming, coding, music, rock climbing)*\n'
+                    '- Are you looking for a science or nature program? '
+                    '*(e.g. animals, marine biology, space)*\n'
+                    '- Or something else entirely?\n\n'
                     f"*Tell me more and I'll search our verified member camps in {loc_hint}!*"
                 ), elapsed, filters
 
