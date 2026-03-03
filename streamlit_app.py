@@ -338,6 +338,12 @@ for _term, _canonical in {
     # Other
     'news': 'journalism', 'meditation': 'mindfulness',
     'd&d': 'dungeons and dragons', 'dnd': 'dungeons and dragons',
+    # Umbrella categories
+    'sport': 'sports', 'athletic': 'sports', 'athletics': 'sports',
+    'art': 'arts', 'creative arts': 'arts', 'arts and crafts': 'arts',
+    'technology': 'tech', 'computer': 'computers',
+    'health and fitness': 'health', 'fitness': 'health',
+    'outdoor adventure': 'adventure', 'outdoors': 'outdoor',
 }.items():
     _ACTIVITY_SYNONYM_MAP.setdefault(_canonical, set()).add(_term)
 # Also add each canonical name as its own synonym so the lookup always works
@@ -673,8 +679,6 @@ SEMANTIC_ONLY_ACTIVITIES = {
     # Health (no confirmed code)
     'nutrition', 'pilates', 'weight loss', 'first aid', 'bronze cross',
     'strength and conditioning',
-    # Adventure (no confirmed code)
-    'military', 'ropes course', 'travel',
 }
 
 
@@ -780,6 +784,12 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
 
         # ── SPORTS ──────────────────────────────────────────────────────────
         # Has dedicated codes; most Ball Sports subcategories fall to semantic
+        # Umbrella terms — use all specific sport codes so SQL returns variety
+        'sports':               [29, 54, 66, 26, 63, 56, 49, 41, 30, 164],
+        'sport':                [29, 54, 66, 26, 63, 56, 49, 41, 30, 164],
+        'ball sports':          [54, 66, 63, 26],
+        'water sports':         [41, 49, 56],
+        'extreme sports':       [41],
         'hockey':               [29],
         'ice hockey':           [29],
         'ball hockey':          [29],
@@ -827,6 +837,10 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         # surfing, fishing, paintball, taekwondo, karate, ping pong, zip line, etc.
 
         # ── COMPUTERS & TECH ────────────────────────────────────────────────
+        # Umbrella terms
+        'computers':            [18, 68, 180, 266, 159, 67, 160, 302],
+        'computers and tech':   [18, 68, 180, 266, 159, 67, 160, 302],
+        'tech':                 [18, 68, 180, 266, 159, 67, 160, 302],
         'coding':               [18, 68, 180, 266, 159],
         'programming':          [18, 68, 180, 266, 159],
         'python':               [18, 180],
@@ -857,6 +871,10 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         # mechatronics, micro:bit, gaming (general)
 
         # ── ARTS ────────────────────────────────────────────────────────────
+        # Umbrella terms
+        'arts':                 [37, 59, 22, 69, 133, 71, 172],
+        'art':                  [37, 59, 22, 69, 133, 71, 172],
+        'visual arts':          [69, 71, 172],
         'music':                [37],
         'guitar':               [37],
         'piano':                [37],
@@ -888,6 +906,8 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         # YouTube/vlogging, sculpture, cartooning, comic art, mixed media
 
         # ── EDUCATION ───────────────────────────────────────────────────────
+        # Umbrella terms
+        'education':            [32, 97, 362, 314, 278, 88, 129, 20],
         'debate':               [362, 97],
         'public speaking':      [362, 97],
         'speech':               [362, 97],
@@ -904,18 +924,26 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         # makerspace, board games, reading, forensic science, marine biology,
         # architecture, meteorology, zoology, test prep, urban exploration
 
-        # ── OUTDOOR / TRADITIONAL ────────────────────────────────────────────
+        # ── OUTDOOR / TRADITIONAL / ADVENTURE ─────────────────────────────────
+        # Adventure is a top-level taxonomy category
+        'adventure':            [181, 24, 41, 58, 265],
         'traditional':          [181, 24, 58, 265],
         'wilderness':           [181, 24, 41],
         'outdoor':              [181, 24, 41, 49, 58, 265],
-        'adventure':            [181, 41],
         'nature':               [24, 181],
         'hiking':               [24, 181],
         'survival skills':      [24, 181],
         'wilderness skills':    [24, 181],
+        'wilderness out-tripping': [24, 181, 41],
+        'out-tripping':         [24, 181, 41],
         'canoe tripping':       [41],
+        'ropes course':         [181, 265],
+        'military':             [181, 265],
+        'travel':               [181],
 
         # ── LEADERSHIP / HEALTH / WELLNESS ──────────────────────────────────
+        'health':               [91, 88],
+        'health and fitness':   [91, 88],
         'leadership':           [88, 33],
         'wellness':             [91],
         'yoga':                 [91],
@@ -997,6 +1025,11 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         'farm animals': 'animals', 'farm': 'animals',
         # Health / Wellness
         'meditation': 'mindfulness',
+        # Umbrella categories
+        'sport': 'sports', 'athletic': 'sports', 'athletics': 'sports',
+        'arts and crafts': 'arts', 'art': 'arts', 'creative arts': 'arts',
+        'technology': 'tech', 'computer': 'computers',
+        'outdoor adventure': 'adventure', 'outdoors': 'outdoor',
         # Misc
         'stem': 'stem', 'steam': 'steam',
         'drone': 'drone', 'drones': 'drone', 'uav': 'drone',
@@ -1672,8 +1705,14 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     from sqlalchemy import create_engine as _ce
     _search_engine = _ce(get_db_uri(config, config["DB_CAMP_DIR"]), pool_pre_ping=True)
     _tracer_log(f"process_query: filters={filters}")
+    # Semantic-only activities have no SQL specialty codes, so the DB query
+    # returns an arbitrary slice of camps.  Increase the pool so semantic
+    # scoring can surface the right ones from the full result set.
+    _activity_for_limit = (filters.get('activity') or '').lower().strip()
+    _semantic_only_limit = 200 if _activity_for_limit in SEMANTIC_ONLY_ACTIVITIES else 20
     camps, province, region, fallback, _activity_has_codes = search_camps(
         filters, config,
+        limit=_semantic_only_limit,
         named_camp=named_camp_override if 'named_camp_override' in locals() else None,
         engine=_search_engine
     )
@@ -1749,8 +1788,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         filters['activity'] = 'cooking'
         activity_raw = 'cooking'
         # Re-run search with corrected filters
+        _act2 = (filters.get('activity') or '').lower().strip()
+        _sem_limit2 = 200 if _act2 in SEMANTIC_ONLY_ACTIVITIES else 20
         camps, province, region, fallback, _activity_has_codes = search_camps(
             filters, config,
+            limit=_sem_limit2,
             named_camp=named_camp_override if 'named_camp_override' in locals() else None,
             engine=_search_engine
         )
@@ -1873,6 +1915,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'reptile': 'animals', 'bird': 'animals', 'birds': 'animals',
         'farm animals': 'animals', 'farm': 'animals',
         'meditation': 'mindfulness',
+        # Umbrella categories
+        'sport': 'sports', 'athletic': 'sports', 'athletics': 'sports',
+        'arts and crafts': 'arts', 'art': 'arts', 'creative arts': 'arts',
+        'technology': 'tech', 'computer': 'computers',
+        'outdoor adventure': 'adventure', 'outdoors': 'outdoor',
         'drone': 'drone', 'drones': 'drone', 'uav': 'drone',
         'vr': 'virtual reality', 'website': 'web design',
     }
