@@ -583,6 +583,47 @@ IMPORTANT: Each query is independent. Do not carry over context from previous qu
         return {}
 
 
+# ── SEMANTIC-ONLY ACTIVITIES ──────────────────────────────────────────────
+# These are valid taxonomy activities (from camps.ca PDF) that don't have a
+# confirmed specialty code mapping. They are RECOGNISED as valid activities,
+# so they bypass the low-confidence gate and go directly to semantic search.
+# Semantic ranking will surface the right camps by topic similarity.
+# NOTE: 'animals' is here because the DB code is unconfirmed. Once verified,
+# it should be moved to ACTIVITY_CODES_SQL with its real code.
+SEMANTIC_ONLY_ACTIVITIES = {
+    # Science subcategories
+    'animals', 'zoology', 'marine biology', 'safari', 'archaeology',
+    'forensic science', 'meteorology', 'medical science', 'health science',
+    # Sports (no confirmed code)
+    'basketball', 'lacrosse', 'archery', 'gymnastics', 'martial arts',
+    'ninja warrior', 'trampoline', 'rock climbing', 'fencing', 'parkour',
+    'cycling', 'fishing', 'paintball', 'ping pong', 'zip line',
+    'skiing', 'snowboarding', 'skateboarding', 'mountain biking',
+    'rollerblading', 'bmx', 'flag football', 'dodgeball', 'rugby',
+    'cricket', 'badminton', 'squash', 'pickleball', 'track and field',
+    'football', 'ultimate frisbee', 'water polo', 'diving', 'surfing',
+    'tubing', 'scooter', 'gaga',
+    # Arts (no confirmed code)
+    'pottery', 'ceramics', 'drawing', 'painting', 'circus', 'comedy',
+    'puppetry', 'storytelling', 'podcasting', 'magic', 'woodworking',
+    'sculpture', 'cartooning', 'knitting', 'mixed media',
+    'dungeons and dragons', 'harry potter', 'fantasy', 'medieval',
+    'star wars', 'youtube vlogging', 'makeup artistry',
+    # Computers (no confirmed code)
+    'drone', 'virtual reality', 'web design', 'mechatronics',
+    '3d printing', '3d design', 'gaming', 'video game development',
+    # Education (no confirmed code)
+    'financial literacy', 'entrepreneurship', 'journalism', 'makerspace',
+    'board games', 'reading', 'test preparation', 'urban exploration',
+    'logical thinking', 'skilled trades', 'credit courses',
+    # Health (no confirmed code)
+    'nutrition', 'pilates', 'weight loss', 'first aid', 'bronze cross',
+    'strength and conditioning',
+    # Adventure (no confirmed code)
+    'military', 'ropes course', 'travel',
+}
+
+
 def search_camps(filters, config, limit=20, named_camp=None, engine=None):
     """Query sessions_clean joined to camps_clean for session-level precision"""
     from sqlalchemy import create_engine, text
@@ -839,45 +880,6 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
     # Generic umbrella codes — too broad to mean a specific activity
     GENERIC_CODES_SQL = {188, 268, 9, 10, 79, 33}
 
-    # ── SEMANTIC-ONLY ACTIVITIES ──────────────────────────────────────────────
-    # These are valid taxonomy activities (from camps.ca PDF) that don't have a
-    # confirmed specialty code mapping. They are RECOGNISED as valid activities,
-    # so they bypass the low-confidence gate and go directly to semantic search.
-    # Semantic ranking will surface the right camps by topic similarity.
-    # NOTE: 'animals' is here because the DB code is unconfirmed. Once verified,
-    # it should be moved to ACTIVITY_CODES_SQL with its real code.
-    SEMANTIC_ONLY_ACTIVITIES = {
-        # Science subcategories
-        'animals', 'zoology', 'marine biology', 'safari', 'archaeology',
-        'forensic science', 'meteorology', 'medical science', 'health science',
-        # Sports (no confirmed code)
-        'basketball', 'lacrosse', 'archery', 'gymnastics', 'martial arts',
-        'ninja warrior', 'trampoline', 'rock climbing', 'fencing', 'parkour',
-        'cycling', 'fishing', 'paintball', 'ping pong', 'zip line',
-        'skiing', 'snowboarding', 'skateboarding', 'mountain biking',
-        'rollerblading', 'bmx', 'flag football', 'dodgeball', 'rugby',
-        'cricket', 'badminton', 'squash', 'pickleball', 'track and field',
-        'football', 'ultimate frisbee', 'water polo', 'diving', 'surfing',
-        'tubing', 'scooter', 'gaga',
-        # Arts (no confirmed code)
-        'pottery', 'ceramics', 'drawing', 'painting', 'circus', 'comedy',
-        'puppetry', 'storytelling', 'podcasting', 'magic', 'woodworking',
-        'sculpture', 'cartooning', 'knitting', 'mixed media',
-        'dungeons and dragons', 'harry potter', 'fantasy', 'medieval',
-        'star wars', 'youtube vlogging', 'makeup artistry',
-        # Computers (no confirmed code)
-        'drone', 'virtual reality', 'web design', 'mechatronics',
-        '3d printing', '3d design', 'gaming', 'video game development',
-        # Education (no confirmed code)
-        'financial literacy', 'entrepreneurship', 'journalism', 'makerspace',
-        'board games', 'reading', 'test preparation', 'urban exploration',
-        'logical thinking', 'skilled trades', 'credit courses',
-        # Health (no confirmed code)
-        'nutrition', 'pilates', 'weight loss', 'first aid', 'bronze cross',
-        'strength and conditioning',
-        # Adventure (no confirmed code)
-        'military', 'ropes course', 'travel',
-    }
     # Location/region codes leaked into specialty column — exclude from all activity filters
     LOCATION_CODES_SQL = {288, 150, 347, 170, 81, 256, 130, 11, 135, 176, 287, 315, 317,
                           318, 342, 347}
