@@ -1281,6 +1281,15 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
             _prog_title = _prog_raw.split(':', 1)[1].strip().split(' (ages')[0].strip()
         _display_title = f"{_prog_title}: {name}" if _prog_title else name
 
+        # Score display — shown for testing; uses final_score (post-Gold) as pct
+        _final   = c.get('_final_score')
+        _rel     = c.get('_relevancy')
+        if _final is not None:
+            _pct = int(round(_final * 100))
+            _score_line = f"   * **Match:** {_pct}%"
+        else:
+            _score_line = ""
+
         block = (
             f"* **[{_display_title}]({url})**\n"
             f"   * **Location:** {region_c}, {province_c}\n"
@@ -1289,8 +1298,10 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
             block += why_line + "\n"
         block += (
             f"   * **Ages:** {age_display} | **Cost:** {cost_display}\n"
-            f"   * **Type:** {camp_style}"
+            f"   * **Type:** {camp_style}\n"
         )
+        if _score_line:
+            block += _score_line
         blocks.append(block)
 
     return intro + "\n".join(blocks)
