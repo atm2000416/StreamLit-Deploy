@@ -528,6 +528,42 @@ Examples:
 - "all-girls" or "girls only" or "girls camp" or "for girls" → gender: "girls"
 - "all-boys" or "boys only" or "boys camp" or "for boys" → gender: "boys"
 - no gender mention → gender: null
+Normalise activity to the closest camp taxonomy term. Examples:
+- "puppy", "dog", "cat", "pets", "pet care", "animals", "bunny", "rabbit", "hamster", "reptile", "bird" → activity: "animals"
+- "zoo", "zoology", "safari", "wildlife" → activity: "animals"
+- "marine biology", "ocean", "sea creatures", "dolphins", "sharks" → activity: "marine biology"
+- "space", "astronomy", "planets", "rockets", "nasa" → activity: "space"
+- "rock climbing", "climbing" → activity: "rock climbing"
+- "gymnastics", "gym" → activity: "gymnastics"
+- "basketball", "hoops" → activity: "basketball"
+- "lacrosse" → activity: "lacrosse"
+- "martial arts", "karate", "taekwondo", "judo", "jiu jitsu", "kung fu" → activity: "martial arts"
+- "ninja", "ninja warrior" → activity: "ninja warrior"
+- "trampoline", "trampolining" → activity: "trampoline"
+- "archery", "bow and arrow" → activity: "archery"
+- "fencing" → activity: "fencing"
+- "financial literacy", "money", "finance", "investing" → activity: "financial literacy"
+- "entrepreneurship", "business", "startup" → activity: "entrepreneurship"
+- "journalism", "news", "reporting" → activity: "journalism"
+- "dungeons and dragons", "d&d", "dnd" → activity: "dungeons and dragons"
+- "harry potter", "magic school", "wizardry" → activity: "harry potter"
+- "circus", "acrobatics", "juggling" → activity: "circus"
+- "comedy", "improv", "stand-up" → activity: "comedy"
+- "pottery", "ceramics", "clay" → activity: "pottery"
+- "drawing", "sketching" → activity: "drawing"
+- "painting" → activity: "painting"
+- "woodworking", "carpentry" → activity: "woodworking"
+- "drone", "drones", "uav" → activity: "drone"
+- "vr", "virtual reality" → activity: "virtual reality"
+- "web design", "web development", "website" → activity: "web design"
+- "skiing", "ski" → activity: "skiing"
+- "snowboarding", "snowboard" → activity: "snowboarding"
+- "skateboarding", "skate" → activity: "skateboarding"
+- "cycling", "bike", "biking", "mountain biking" → activity: "cycling"
+- "fishing", "angling" → activity: "fishing"
+- "parkour", "freerunning" → activity: "parkour"
+- "yoga" → activity: "yoga"
+- "mindfulness", "meditation" → activity: "mindfulness"
 IMPORTANT: Each query is independent. Do not carry over context from previous queries."""
 
     _tracer_log(f"extract_filters: input='{user_text[:80]}'")
@@ -802,6 +838,53 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
     }
     # Generic umbrella codes — too broad to mean a specific activity
     GENERIC_CODES_SQL = {188, 268, 9, 10, 79, 33}
+
+    # ── SEMANTIC-ONLY ACTIVITIES ──────────────────────────────────────────────
+    # These are valid taxonomy activities (from camps.ca PDF) that don't have a
+    # confirmed specialty code mapping. They are RECOGNISED as valid activities,
+    # so they bypass the low-confidence gate and go directly to semantic search.
+    # Semantic ranking will surface the right camps by topic similarity.
+    # NOTE: 'animals' is here because the DB code is unconfirmed. Once verified,
+    # it should be moved to ACTIVITY_CODES_SQL with its real code.
+    SEMANTIC_ONLY_ACTIVITIES = {
+        # Science subcategories
+        'animals', 'zoology', 'marine biology', 'safari', 'archaeology',
+        'forensic science', 'meteorology', 'medical science', 'health science',
+        # Sports (no confirmed code)
+        'basketball', 'lacrosse', 'archery', 'gymnastics', 'martial arts',
+        'ninja warrior', 'trampoline', 'rock climbing', 'fencing', 'parkour',
+        'cycling', 'fishing', 'paintball', 'ping pong', 'zip line',
+        'skiing', 'snowboarding', 'skateboarding', 'mountain biking',
+        'rollerblading', 'bmx', 'flag football', 'dodgeball', 'rugby',
+        'cricket', 'badminton', 'squash', 'pickleball', 'track and field',
+        'football', 'ultimate frisbee', 'water polo', 'diving', 'surfing',
+        'tubing', 'scooter', 'gaga',
+        # Arts (no confirmed code)
+        'pottery', 'ceramics', 'drawing', 'painting', 'circus', 'comedy',
+        'puppetry', 'storytelling', 'podcasting', 'magic', 'woodworking',
+        'sculpture', 'cartooning', 'knitting', 'mixed media',
+        'dungeons and dragons', 'harry potter', 'fantasy', 'medieval',
+        'star wars', 'youtube vlogging', 'makeup artistry',
+        # Computers (no confirmed code)
+        'drone', 'virtual reality', 'web design', 'mechatronics',
+        '3d printing', '3d design', 'gaming', 'video game development',
+        # Education (no confirmed code)
+        'financial literacy', 'entrepreneurship', 'journalism', 'makerspace',
+        'board games', 'reading', 'test preparation', 'urban exploration',
+        'logical thinking', 'skilled trades', 'credit courses',
+        # Health (no confirmed code)
+        'nutrition', 'pilates', 'weight loss', 'first aid', 'bronze cross',
+        'strength and conditioning',
+        # Adventure (no confirmed code)
+        'military', 'ropes course', 'travel',
+    }
+    # If activity resolves to a semantic-only item: skip SQL code lookup,
+    # set _activity_has_codes=False, proceed directly to semantic scoring.
+    if activity:
+        _sem_only_check = _ACTIVITY_ALIASES.get(activity.lower().strip(), activity.lower().strip())
+        if _sem_only_check in SEMANTIC_ONLY_ACTIVITIES:
+            _tracer_log(f"search_camps: '{activity}' → semantic-only (valid taxonomy, no DB code)")
+            _activity_has_codes = False
     # Location/region codes leaked into specialty column — exclude from all activity filters
     LOCATION_CODES_SQL = {288, 150, 347, 170, 81, 256, 130, 11, 135, 176, 287, 315, 317,
                           318, 342, 347}
@@ -809,21 +892,68 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
 
     # Normalize activity aliases before lookup
     _ACTIVITY_ALIASES = {
+        # AI / Tech
         'artificial intelligence': 'ai', 'machine learning': 'ai',
         'a.i.': 'ai', 'a.i': 'ai',
         'computer science': 'coding', 'computer programming': 'coding',
         'software': 'coding', 'app development': 'coding',
+        # Sports
         'horse riding': 'horseback riding', 'horseback': 'horseback riding',
-        'equestrian': 'equestrian',
         'ball hockey': 'hockey', 'ice hockey': 'hockey',
         'cheerleading': 'cheer', 'cheering': 'cheer',
-        'chef': 'cooking', 'culinary': 'cooking', 'baking': 'cooking',
-        'drama': 'theatre', 'theater': 'theatre', 'acting': 'theatre',
-        'stem': 'stem', 'steam': 'steam',
-        'maths': 'math', 'mathematics': 'math',
         'swimming': 'swimming', 'swim': 'swimming',
         'canoeing': 'canoeing', 'canoe': 'canoeing', 'kayaking': 'canoeing',
+        'hoops': 'basketball',
+        'karate': 'martial arts', 'taekwondo': 'martial arts',
+        'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
+        'ninja': 'ninja warrior', 'ninja warrior': 'ninja warrior',
+        'trampolining': 'trampoline',
+        'bow and arrow': 'archery',
+        'ski': 'skiing', 'snowboard': 'snowboarding',
+        'skate': 'skateboarding', 'skateboard': 'skateboarding',
+        'bike': 'cycling', 'biking': 'cycling', 'mountain biking': 'cycling',
+        'angling': 'fishing',
+        'freerunning': 'parkour',
+        'climbing': 'rock climbing',
+        'gymnastics': 'gymnastics',
+        # Arts
+        'chef': 'cooking', 'culinary': 'cooking', 'baking': 'cooking',
+        'drama': 'theatre', 'theater': 'theatre', 'acting': 'theatre',
+        'clay': 'pottery', 'ceramics': 'pottery',
+        'carpentry': 'woodworking',
+        'improv': 'comedy', 'stand-up': 'comedy',
+        'juggling': 'circus', 'acrobatics': 'circus',
+        'sketching': 'drawing',
+        'djing': 'djing', 'dj': 'djing',
+        'd&d': 'dungeons and dragons', 'dnd': 'dungeons and dragons',
+        # Education / Science
+        'maths': 'math', 'mathematics': 'math',
         'debate': 'debate', 'public speaking': 'public speaking', 'speech': 'public speaking',
+        'money': 'financial literacy', 'finance': 'financial literacy', 'investing': 'financial literacy',
+        'business': 'entrepreneurship', 'startup': 'entrepreneurship',
+        'news': 'journalism', 'reporting': 'journalism',
+        'astronomy': 'space', 'planets': 'space', 'rockets': 'space', 'nasa': 'space',
+        'ocean': 'marine biology', 'sea creatures': 'marine biology',
+        'dolphins': 'marine biology', 'sharks': 'marine biology',
+        'wildlife': 'animals', 'zoo': 'animals', 'zoology': 'animals', 'safari': 'animals',
+        # ── ANIMAL / PET TERMS → animals ─────────────────────────────────────
+        # "puppy camps", "dog camp", "cat camp" etc. → Animals (Science taxonomy)
+        'puppy': 'animals', 'puppies': 'animals',
+        'dog': 'animals', 'dogs': 'animals',
+        'cat': 'animals', 'cats': 'animals', 'kitten': 'animals', 'kittens': 'animals',
+        'pet': 'animals', 'pets': 'animals', 'pet care': 'animals',
+        'bunny': 'animals', 'rabbit': 'animals', 'rabbits': 'animals',
+        'hamster': 'animals', 'reptile': 'animals', 'reptiles': 'animals',
+        'bird': 'animals', 'birds': 'animals',
+        'farm animals': 'animals', 'farm': 'animals',
+        # Health / Wellness
+        'meditation': 'mindfulness',
+        # Misc
+        'stem': 'stem', 'steam': 'steam',
+        'drone': 'drone', 'drones': 'drone', 'uav': 'drone',
+        'vr': 'virtual reality',
+        'website': 'web design', 'web development': 'web design',
+        'uav': 'drone',
     }
 
     if activity:
@@ -1268,7 +1398,7 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
         camp_style= 'Overnight Camp' if c.get('camp_style') == 'overnight' else 'Day Camp'
 
         age_display  = f"Ages {age_min}–{age_max}" if age_min and age_max else "Ages vary"
-        cost_display = f"${cost_min:,}–${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
+        cost_display = f"\${cost_min:,}–\${cost_max:,}/week" if cost_min and cost_max else "Contact for pricing"
 
         blurb = blurbs.get(i, '')
         why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
@@ -1690,6 +1820,38 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                     break
 
         raw_deduped = sorted_camps[:cut_idx]
+
+        # ── LOW-CONFIDENCE GATE ───────────────────────────────────────────────
+        # Architecture principle: clarify before returning noise.
+        # embedding-001 compresses scores into ~0.82–0.91.
+        # If the best-matching camp scores below LOW_CONFIDENCE_THRESHOLD,
+        # the activity is genuinely unrecognised — showing results misleads parents.
+        # Ask a clarifying question instead.
+        # NOTE: SEMANTIC_ONLY_ACTIVITIES bypass this gate — they are recognised
+        # taxonomy items and their semantic scores are expected to be meaningful.
+        LOW_CONFIDENCE_THRESHOLD = 0.855
+        _act_is_taxonomy = activity_query.lower() in SEMANTIC_ONLY_ACTIVITIES
+        if raw_deduped and not _act_is_taxonomy:
+            _max_sem = max(c.get('_semantic_score', 0) for c in raw_deduped)
+            if _max_sem < LOW_CONFIDENCE_THRESHOLD:
+                elapsed = time.time() - start
+                _tracer_log(
+                    f"LOW-CONFIDENCE GATE: activity='{activity_query}' "
+                    f"max_semantic={_max_sem:.4f} < {LOW_CONFIDENCE_THRESHOLD} "
+                    f"→ clarifying question (not a taxonomy activity)"
+                )
+                loc_hint = filters.get('region') or filters.get('province') or 'Canada'
+                return (
+                    f"I want to make sure I find the right camps for you! "
+                    f"I'm not familiar with **"{activity_query}"** as a camp activity.\n\n"
+                    f"Could you help me understand what you're looking for? For example:\n\n"
+                    f"- Did you mean a specific sport, art, or skill? "
+                    f"*(e.g. swimming, coding, music, rock climbing)*\n"
+                    f"- Are you looking for a science or nature program? "
+                    f"*(e.g. animals, marine biology, space)*\n"
+                    f"- Or something else entirely?\n\n"
+                    f"*Tell me more and I'll search our verified member camps in {loc_hint}!*"
+                ), elapsed, filters
 
         if not raw_deduped:
             elapsed = time.time() - start
