@@ -22,11 +22,19 @@
 
       {
 
-        "matcher": "Write|Edit",
+        "matcher": "Edit|Write|MultiEdit",
 
-        "command": "bash -c 'if [[ \"$TOOL_INPUT\" == *streamlit_app.py* ]]; then python3 -c \"import ast; ast.parse(open(\\\"streamlit_app.py\\\").read()); print(\\\"Syntax OK\\\")\" || echo \"SYNTAX ERROR — revert this change\"; fi'",
+        "hooks": [
 
-        "description": "Auto syntax check after editing streamlit_app.py"
+          {
+
+            "type": "command",
+
+            "command": "jq -r '.tool_input.file_path // .tool_input.path // empty' | { read file_path; if echo \"$file_path\" | grep -q 'streamlit_app.py'; then python3 -c \"import ast; ast.parse(open('streamlit_app.py').read()); print('Syntax OK')\" || echo 'SYNTAX ERROR — revert this change'; fi; }"
+
+          }
+
+        ]
 
       }
 
