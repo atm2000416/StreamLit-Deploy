@@ -295,6 +295,56 @@ def call_gemini(system_prompt, user_prompt, api_key, max_tokens=512):
 # CORE RAG PIPELINE
 # ═════════════════════════════════════════════
 
+# ── REVERSE ALIAS MAP ─────────────────────────────────────────────────────
+# Maps canonical activity names → set of user-facing terms that Gemini may
+# infer them from.  Used by _validate_filters so that "puppy camps" is
+# recognised as evidence for activity="animals", etc.
+_ACTIVITY_SYNONYM_MAP: dict[str, set[str]] = {}
+for _term, _canonical in {
+    # Animals / pets
+    'puppy': 'animals', 'puppies': 'animals', 'dog': 'animals', 'dogs': 'animals',
+    'cat': 'animals', 'cats': 'animals', 'kitten': 'animals', 'kittens': 'animals',
+    'pet': 'animals', 'pets': 'animals', 'bunny': 'animals', 'rabbit': 'animals',
+    'hamster': 'animals', 'reptile': 'animals', 'bird': 'animals', 'birds': 'animals',
+    'wildlife': 'animals', 'zoo': 'animals', 'zoology': 'animals', 'safari': 'animals',
+    'farm': 'animals',
+    # Sports
+    'horse': 'horseback riding', 'horseback': 'horseback riding',
+    'hoops': 'basketball', 'karate': 'martial arts', 'taekwondo': 'martial arts',
+    'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
+    'ninja': 'ninja warrior', 'trampolining': 'trampoline',
+    'climbing': 'rock climbing', 'ski': 'skiing', 'snowboard': 'snowboarding',
+    'skate': 'skateboarding', 'bike': 'cycling', 'biking': 'cycling',
+    'angling': 'fishing', 'freerunning': 'parkour',
+    'swim': 'swimming', 'swimming': 'swim',
+    # Arts / performance
+    'chef': 'cooking', 'culinary': 'cooking',
+    'drama': 'theatre', 'theater': 'theatre', 'acting': 'theatre',
+    'clay': 'pottery', 'ceramics': 'pottery',
+    'carpentry': 'woodworking', 'improv': 'comedy',
+    'juggling': 'circus', 'acrobatics': 'circus', 'sketching': 'drawing',
+    # STEM
+    'astronomy': 'space', 'planets': 'space', 'planet': 'space',
+    'rockets': 'space', 'rocket': 'space',
+    'ocean': 'marine biology', 'dolphins': 'marine biology', 'sharks': 'marine biology',
+    'dolphin': 'marine biology', 'shark': 'marine biology',
+    'maths': 'math', 'mathematics': 'math',
+    'money': 'financial literacy', 'finance': 'financial literacy',
+    'business': 'entrepreneurship', 'startup': 'entrepreneurship',
+    'ai': 'artificial intelligence', 'machine learning': 'artificial intelligence',
+    'computer science': 'coding', 'programming': 'coding', 'software': 'coding',
+    'drone': 'drone', 'drones': 'drone', 'uav': 'drone',
+    'vr': 'virtual reality', 'website': 'web design',
+    # Other
+    'news': 'journalism', 'meditation': 'mindfulness',
+    'd&d': 'dungeons and dragons', 'dnd': 'dungeons and dragons',
+}.items():
+    _ACTIVITY_SYNONYM_MAP.setdefault(_canonical, set()).add(_term)
+# Also add each canonical name as its own synonym so the lookup always works
+for _canonical in list(_ACTIVITY_SYNONYM_MAP):
+    _ACTIVITY_SYNONYM_MAP[_canonical].add(_canonical)
+
+
 def _validate_filters(filters, user_text):
     """Strip filter values not evidenced in the raw message text.
     Prevents Gemini from bleeding prior context into a fresh query.
@@ -318,11 +368,15 @@ def _validate_filters(filters, user_text):
             negated_words.add(m.group(1))
 
     # Activity: must have a keyword hint in the message AND not be negated
+    # Check both the canonical activity words AND known synonyms that map to it
+    # (e.g. "puppy" → "animals") so Gemini's normalisation isn't rejected
     activity = (filters.get('activity') or '').lower()
     if activity:
         activity_words = set(re.findall(r'\w+', activity))
+        synonym_terms = _ACTIVITY_SYNONYM_MAP.get(activity, set())
+        all_evidence_terms = activity_words | synonym_terms
         is_negated = bool(activity_words & negated_words)
-        if is_negated or not any(w in text for w in activity_words if len(w) > 1):
+        if is_negated or not any(w in text for w in all_evidence_terms if len(w) > 1):
             validated['activity'] = None
 
     # Gender: must have an explicit gender word
