@@ -1690,6 +1690,20 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             not activity_changed):
             filters['activity'] = last_filters['activity']
 
+        # CRITICAL: If the new message changes/adds activity but has no location,
+        # and the previous turn had a location, inherit it.
+        # e.g. "puppy camps in belleville" → "what about basketball?" should keep Belleville
+        if last_filters and not filters.get('province') and not filters.get('region'):
+            _prev_prov = (last_filters.get('province') or '').lower()
+            _broad_provinces = ('canada', 'all', 'any', 'nationwide', '')
+            if last_filters.get('province') and _prev_prov not in _broad_provinces:
+                filters['province'] = last_filters['province']
+            if last_filters.get('region'):
+                filters['region'] = last_filters['region']
+            if filters.get('province') or filters.get('region'):
+                _tracer_log(f"process_query: inherited location from previous turn → "
+                            f"province={filters.get('province')} region={filters.get('region')}")
+
     elif ai_asked_question or is_pure_refinement or is_location_reply or is_correction:
         # Short additive reply — merge new detail into existing search
         clean_last = {k: v for k, v in last_filters.items()}
@@ -1700,6 +1714,17 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     else:
         # Default: treat as fresh
         filters = new_filters_peek
+        # Inherit location from previous turn if new message has none
+        if last_filters and not filters.get('province') and not filters.get('region'):
+            _prev_prov = (last_filters.get('province') or '').lower()
+            _broad_provinces = ('canada', 'all', 'any', 'nationwide', '')
+            if last_filters.get('province') and _prev_prov not in _broad_provinces:
+                filters['province'] = last_filters['province']
+            if last_filters.get('region'):
+                filters['region'] = last_filters['region']
+            if filters.get('province') or filters.get('region'):
+                _tracer_log(f"process_query: inherited location from previous turn → "
+                            f"province={filters.get('province')} region={filters.get('region')}")
     # Step 3: Fetch matching camps from camps_clean
     # Build engine once — reused for embeddings and search
     from sqlalchemy import create_engine as _ce
