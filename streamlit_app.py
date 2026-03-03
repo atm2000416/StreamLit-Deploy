@@ -1273,8 +1273,16 @@ def render_results(deduped, blurbs, user_text, filters, fallback, province, regi
         blurb = blurbs.get(i, '')
         why_line = f"   * **Why it fits:** {blurb}" if blurb else ""
 
+        # Extract first program title from matching_programs
+        # SQL format: "#id: Class Name (ages X-Y) — desc ||| ..."
+        _prog_raw = (c.get('matching_programs') or '').split(' ||| ')[0]
+        _prog_title = ''
+        if _prog_raw and ':' in _prog_raw:
+            _prog_title = _prog_raw.split(':', 1)[1].strip().split(' (ages')[0].strip()
+        _display_title = f"{_prog_title}: {name}" if _prog_title else name
+
         block = (
-            f"* **[{name}]({url})**\n"
+            f"* **[{_display_title}]({url})**\n"
             f"   * **Location:** {region_c}, {province_c}\n"
         )
         if why_line:
@@ -2371,28 +2379,6 @@ with st.sidebar:
         if _gerr:
             st.error(f"Last Gemini error: {_gerr}")
 
-    with st.form("consultation_form"):
-        st.markdown('<div class="sb-section">👤 About You</div>', unsafe_allow_html=True)
-        contact_name = st.text_input("Your name", placeholder="e.g. Sarah")
-        region_camp  = st.text_input("City or region", placeholder="e.g. Toronto, Ottawa, Vancouver")
-
-        st.markdown('<div class="sb-section">🏕️ Camp Preferences</div>', unsafe_allow_html=True)
-        category_options = [
-            "Any", "STEM / Science / Technology", "Sports",
-            "Arts / Music / Dance", "Outdoor / Adventure",
-            "Academic / Tutoring", "Language / French",
-            "Equestrian / Riding", "Cooking / Chef",
-            "Leadership", "Traditional / Multi-Activity",
-            "Special Needs / Adapted"
-        ]
-        category_camp = st.selectbox("Camp category", category_options)
-        camp_type     = st.text_input("Specific activity", placeholder="e.g. robotics, hockey, painting")
-        age_child     = st.text_input("Child's age(s)", placeholder="e.g. 10, or 8 and 12")
-        costs_camp    = st.text_input("Max weekly budget", placeholder="e.g. $500")
-        date_camp     = st.text_input("Preferred dates", placeholder="e.g. July, Summer 2026")
-        overnight     = st.radio("Camp style", ["Either", "Day camp", "Overnight camp"], horizontal=True)
-        submitted     = st.form_submit_button("🔍  Find My Camp!", use_container_width=True)
-
     st.divider()
 
     col1, col2 = st.columns(2)
@@ -2428,30 +2414,6 @@ if "suppress_form" not in st.session_state:
     st.session_state.suppress_form = False
 
 # ── Consultation form handler ─────────────────────────────────────────────────
-if submitted and contact_name and region_camp and not st.session_state.get('suppress_form', False):
-    style_text  = "" if overnight == "Either" else overnight.lower()
-    budget_text = f"under {costs_camp} per week" if costs_camp else ""
-    age_text    = f"for a {age_child}-year-old" if age_child else ""
-    type_text   = camp_type if camp_type else (category_camp if category_camp != "Any" else "general")
-    date_text   = f"around {date_camp}" if date_camp else "this summer"
-
-    structured_query = (
-        f"My name is {contact_name} and I'm looking for {style_text} {type_text} camps "
-        f"in {region_camp} {age_text} {budget_text} {date_text}."
-    ).replace("  ", " ").strip()
-
-    welcome = (
-        f"Hi **{contact_name}**! 👋 Great to have you here.\n\n"
-        f"I'm your personal camp consultant at **camps.ca** — Canada's #1 verified camp network.\n\n"
-        f"Let me search our member database for the best **{type_text}** camps in **{region_camp}** for you... 🔍"
-    )
-    st.session_state.messages = [
-        {"role": "assistant", "content": welcome},
-        {"role": "user",      "content": structured_query}
-    ]
-    st.session_state.consultation_done = False
-    st.rerun()
-
 # ── Welcome message ───────────────────────────────────────────────────────────
 if not st.session_state.messages:
     st.session_state.messages = [{
