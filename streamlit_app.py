@@ -1826,8 +1826,26 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'yes please', 'yes, please', 'yes please show', 'yes, please show',
         'yes show me', 'please show', 'please show me', 'show me please',
         'yes, show me', 'yep please', 'yeah please', 'ok show me',
+        'sure, go ahead', 'sure go ahead', 'sounds good', 'let\'s do it',
+        'perfect', 'great', 'that works', 'let\'s go', 'why not',
     ]
-    is_affirmative = text_lower_check.rstrip("!.,") in affirmatives
+    _clean_text = text_lower_check.rstrip("!.,")
+    is_affirmative = _clean_text in affirmatives
+
+    # Fuzzy affirmative: if every word in the message is an affirmative word,
+    # treat the whole message as affirmative even if the exact phrase isn't listed.
+    # This catches "sure, go ahead" "ok yeah" "yes please do it" etc.
+    if not is_affirmative:
+        _affirm_words = {
+            'yes', 'yeah', 'yep', 'yup', 'ya', 'sure', 'ok', 'okay',
+            'please', 'go', 'ahead', 'do', 'it', 'show', 'me', 'more',
+            'absolutely', 'definitely', 'great', 'perfect', 'sounds', 'good',
+            'let', 'lets', "let's", 'that', 'works', 'why', 'not', 'right',
+            'cool', 'fine', 'alright', 'yea', 'totally',
+        }
+        _words = _clean_text.replace(',', ' ').split()
+        if _words and all(w in _affirm_words for w in _words):
+            is_affirmative = True
 
     # -- Detect location suggestion from AI last message -----------------------
     # If AI said "I found X camps in: **Toronto** (N camps). Search there?"
@@ -1854,6 +1872,26 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         if _prov_match and not _suggested_region:
             _suggested_province = _prov_match.group(1).strip()
             _tracer_log(f"process_query: AI suggested province='{_suggested_province}'")
+
+    # ── PRE-TREE: AI location suggestion + user affirmation ───────────────────
+    # When the AI suggested a new location ("I found ballet in Toronto, search
+    # there?") and the user affirms, this is NOT a normal REUSE/MERGE/FRESH.
+    # We need to: keep last_filters activity + apply the suggested location.
+    # This fires BEFORE the decision tree so it can't be missed by any branch.
+    _suggestion_applied = False
+    if (_suggested_region or _suggested_province) and is_affirmative and last_filters:
+        filters = {k: v for k, v in last_filters.items()
+                   if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
+        if _suggested_region:
+            filters['region'] = _suggested_region
+            _tracer_log(f"process_query: SUGGESTION ACCEPTED — region='{_suggested_region}' "
+                        f"activity='{filters.get('activity')}' (from last_filters)")
+        elif _suggested_province:
+            filters['province'] = _suggested_province
+            filters['region'] = None  # search whole province
+            _tracer_log(f"process_query: SUGGESTION ACCEPTED — province='{_suggested_province}' "
+                        f"activity='{filters.get('activity')}' (from last_filters)")
+        _suggestion_applied = True
 
     # Purely additive refinement phrases
     refinement_only_phrases = [
@@ -1934,24 +1972,20 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     activity_changed = bool(new_activity and prev_activity and new_activity != prev_activity)
 
     # ── Decision tree ────────────────────────────────────────────────────────
+    # SUGGESTION — AI suggested a location, user affirmed (handled above)
     # FRESH  — message is self-contained (2+ own signals), activity changed,
     #          gender flipped, or no prior context exists
     # MERGE  — short additive reply to AI question or known refinement phrase
     # REUSE  — pure affirmative ("yes", "sure", "ok")
 
-    if is_affirmative and last_filters:
-        # Pure yes/sure — reuse last filters, but apply AI's location suggestion if any
+    if _suggestion_applied:
+        # Already handled above — filters have last_filters + suggested location
+        _tracer_log(f"process_query: decision=SUGGESTION filters={filters}")
+
+    elif is_affirmative and last_filters:
+        # Pure yes/sure — reuse last filters exactly
         filters = {k: v for k, v in last_filters.items()
                    if k in ('province', 'region', 'activity', 'style', 'gender', 'age')}
-
-        # If AI suggested a different location and user said yes, apply it
-        if _suggested_region:
-            filters['region'] = _suggested_region
-            _tracer_log(f"process_query: REUSE + applying suggested region='{_suggested_region}'")
-        elif _suggested_province:
-            filters['province'] = _suggested_province
-            filters['region'] = None  # clear region to search whole province
-            _tracer_log(f"process_query: REUSE + applying suggested province='{_suggested_province}'")
 
     elif (not last_filters or
           new_signal_count >= 2 or
