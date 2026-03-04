@@ -318,6 +318,7 @@ for _term, _canonical in {
     'skate': 'skateboarding', 'bike': 'cycling', 'biking': 'cycling',
     'angling': 'fishing', 'freerunning': 'parkour',
     'sea kayaking': 'kayaking', 'kayak': 'kayaking',
+    'skating': 'figure skating', 'inline skating': 'roller skating',
     'swim': 'swimming', 'swimming': 'swim',
     # Arts / performance
     'chef': 'cooking', 'culinary': 'cooking',
@@ -661,6 +662,7 @@ SEMANTIC_ONLY_ACTIVITIES = {
     'ninja warrior', 'trampoline', 'rock climbing', 'fencing', 'parkour',
     'cycling', 'fishing', 'paintball', 'ping pong', 'zip line',
     'skiing', 'snowboarding', 'skateboarding', 'mountain biking',
+    'roller skating', 'inline skating',
     'rollerblading', 'bmx', 'flag football', 'dodgeball', 'rugby',
     'cricket', 'badminton', 'squash', 'pickleball', 'track and field',
     'football', 'ultimate frisbee', 'water polo', 'diving', 'surfing',
@@ -797,6 +799,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         'ball hockey':          [29],
         'figure skating':       [29],
         'ice skating':          [29],
+        'skating':              [29],
         'soccer':               [54],
         'tennis':               [66],
         'golf':                 [26],
@@ -983,6 +986,7 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         'swimming': 'swimming', 'swim': 'swimming',
         'canoeing': 'canoeing', 'canoe': 'canoeing',
         'kayaking': 'kayaking', 'kayak': 'kayaking', 'sea kayaking': 'kayaking',
+        'skating': 'figure skating', 'roller skating': 'roller skating', 'inline skating': 'roller skating',
         'hoops': 'basketball',
         'karate': 'martial arts', 'taekwondo': 'martial arts',
         'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
@@ -1997,6 +2001,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         # Self-contained or clearly new — fresh filters only, no inheritance
         filters = _validate_filters(new_filters_peek, user_text)
 
+        # If validation stripped the extracted activity (no evidence in user text),
+        # activity_changed is a false positive — re-enable inheritance guards.
+        if not filters.get('activity') and activity_changed:
+            activity_changed = False
+
         # CRITICAL: If the new message adds location/age/style but no new activity,
         # and the previous turn had an activity, inherit it.
         # e.g. "hockey camps" → "this for age-10 in Toronto" should keep activity=hockey
@@ -2241,6 +2250,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'cheerleading': 'cheer', 'cheering': 'cheer',
         'swimming': 'swim', 'hoops': 'basketball',
         'kayaking': 'kayaking', 'kayak': 'kayaking', 'sea kayaking': 'kayaking',
+        'skating': 'figure skating', 'roller skating': 'roller skating', 'inline skating': 'roller skating',
         'karate': 'martial arts', 'taekwondo': 'martial arts',
         'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
         'ninja': 'ninja warrior', 'trampolining': 'trampoline',
@@ -2299,6 +2309,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         37: 'music',       # covers: guitar, piano, drums, singing, DJing, songwriting, etc.
         59: 'theatre',     # covers: acting, musical theatre, playwriting, set design, etc.
         41: 'paddle sports',  # covers: kayaking, sea kayaking, canoeing, rowing, paddleboard, etc.
+        29: 'hockey',      # covers: hockey, figure skating, ice skating, ball hockey, etc.
     }
     # Activities that ARE the broad category (no refinement needed)
     _broad_category_names = set(BROAD_PARENT_CODES.values()) | {
@@ -2334,6 +2345,8 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                 'kayaking': [41], 'sea kayaking': [41], 'kayak': [41],
                 'rowing': [41], 'paddleboard': [41], 'stand up paddle': [41],
                 'whitewater': [41], 'waterskiing': [41], 'wakeboarding': [41],
+                # Ice/figure skating sub-activities (broad parent code 29)
+                'figure skating': [29], 'ice skating': [29], 'skating': [29],
             }
             _mapped_codes = _ACTIVITY_CODES_CHECK.get(_aq, [])
             if any(c in BROAD_PARENT_CODES for c in _mapped_codes):

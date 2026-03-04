@@ -1,6 +1,6 @@
 # Search Pipeline Fixes
 
-## Status: 13 verified fixes
+## Status: 15 verified fixes
 
 ### Fix 1: SEMANTIC_ONLY scoping
 - **Problem**: SEMANTIC_ONLY_ACTIVITIES defined inside function, not accessible elsewhere
@@ -81,6 +81,18 @@
 - **Solution**: Pass `user_text` instead of `activity_query` to `semantic_score_camps` in BROAD-CODE REFINEMENT
 - **Verify**: `_broad_semantic_q = user_text if user_text else activity_query` present before semantic_score_camps call in BROAD-CODE block
 - **Test query**: "sea kayaking camps for kids" (sea kayaking camps should rank above canoe tripping)
+
+### Fix 14: 'skating' alias + code 29 broad-code refinement
+- **Problem**: Bare 'skating' had no mapping → fell through to semantic-only with random results; also figure skating camps ranked below hockey camps
+- **Solution**: Added 'skating'→[29] to ACTIVITY_CODES_SQL; added 29 to BROAD_PARENT_CODES; added figure skating/ice skating/skating to _ACTIVITY_CODES_CHECK; added roller skating/inline skating to SEMANTIC_ONLY; added aliases to all 3 maps
+- **Verify**: 'skating' in ACTIVITY_CODES_SQL, 29 in BROAD_PARENT_CODES, 'figure skating'/'skating' in _ACTIVITY_CODES_CHECK, 'roller skating' in SEMANTIC_ONLY_ACTIVITIES
+- **Test query**: "skating camps in hamilton" (figure skating camps should rank above hockey camps)
+
+### Fix 15: Reset activity_changed when _validate_filters strips the activity
+- **Problem**: Gemini mis-extracts follow-up ("this is skating" → 'skateboarding'), triggering activity_changed=True; FRESH fires, location is lost, stripped activity blocks inheritance guards
+- **Solution**: After _validate_filters in FRESH branch, if validated activity is None, reset activity_changed=False so location and activity inheritance guards re-enable
+- **Verify**: `if not filters.get('activity') and activity_changed: activity_changed = False` present in FRESH branch
+- **Test query**: "skating camps in hamilton" → "this is skating" (should keep Hamilton, inherit skating activity)
 
 ## Known Issues (not yet fixed)
 <!-- Add new issues here as they're discovered -->
