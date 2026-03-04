@@ -1,6 +1,6 @@
 # Search Pipeline Fixes
 
-## Status: 12 verified fixes
+## Status: 13 verified fixes
 
 ### Fix 1: SEMANTIC_ONLY scoping
 - **Problem**: SEMANTIC_ONLY_ACTIVITIES defined inside function, not accessible elsewhere
@@ -75,6 +75,12 @@
 - **Test query**: "sea kayaking camps" (sea kayaking camps should rank above canoe tripping)
 
 ---
+
+### Fix 13: BROAD-CODE uses original user text for semantic scoring
+- **Problem**: Gemini strips qualifiers (e.g. "sea kayaking" → "kayaking"), so BROAD-CODE REFINEMENT scored against the wrong term — canoe tripping ranked above sea kayaking
+- **Solution**: Pass `user_text` instead of `activity_query` to `semantic_score_camps` in BROAD-CODE REFINEMENT
+- **Verify**: `_broad_semantic_q = user_text if user_text else activity_query` present before semantic_score_camps call in BROAD-CODE block
+- **Test query**: "sea kayaking camps for kids" (sea kayaking camps should rank above canoe tripping)
 
 ## Known Issues (not yet fixed)
 <!-- Add new issues here as they're discovered -->

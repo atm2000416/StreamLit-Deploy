@@ -2350,8 +2350,11 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
     elif code_match_used and _needs_semantic_refinement:
         # Hybrid: SQL narrowed to the right category, now semantic ranks within it
         if activity_query and embeddings_are_ready(_search_engine):
+            # Use original user text so compound activities like "sea kayaking" or
+            # "classical guitar" aren't lost when Gemini normalises to "kayaking"/"guitar"
+            _broad_semantic_q = user_text if user_text else activity_query
             raw_deduped = semantic_score_camps(
-                raw_deduped, activity_query, config['GEMINI_API_KEY'], _search_engine
+                raw_deduped, _broad_semantic_q, config['GEMINI_API_KEY'], _search_engine
             )
             # Boost: these camps ARE in the right category (SQL confirmed), so
             # give a floor boost to prevent them from scoring lower than random
