@@ -1,6 +1,6 @@
 # Search Pipeline Fixes
 
-## Status: 15 verified fixes
+## Status: 17 verified fixes
 
 ### Fix 1: SEMANTIC_ONLY scoping
 - **Problem**: SEMANTIC_ONLY_ACTIVITIES defined inside function, not accessible elsewhere
@@ -93,6 +93,18 @@
 - **Solution**: After _validate_filters in FRESH branch, if validated activity is None, reset activity_changed=False so location and activity inheritance guards re-enable
 - **Verify**: `if not filters.get('activity') and activity_changed: activity_changed = False` present in FRESH branch
 - **Test query**: "skating camps in hamilton" → "this is skating" (should keep Hamilton, inherit skating activity)
+
+### Fix 16: _validate_filters recovery scan when Gemini mis-extracts activity
+- **Problem**: Gemini extracts 'skateboarding' from "skating camps in hamilton"; _validate_filters strips it (no evidence); activity=None; general location search returns random camps
+- **Solution**: After stripping, scan user text against all _ACTIVITY_SYNONYM_MAP terms; if a known term appears, recover that canonical (e.g. 'skating' → 'figure skating')
+- **Verify**: Recovery loop present in _validate_filters after `validated['activity'] = None`
+- **Test query**: "skating camps in hamilton" (should resolve to figure skating, not general search)
+
+### Fix 17: Province suggestion regex matches "instead" pattern
+- **Problem**: _build_no_results_response formats suggestion as "I can search all of Ontario instead of just Hamilton" (no `?`); regex required `?`; _suggested_province never set; "sure, widen the area" re-ran same failing search
+- **Solution**: Updated regex to also match `instead\b` as a terminator alongside `?`
+- **Verify**: `(?:\s*\?|\s+instead\b)` present in province suggestion regex
+- **Test query**: No results → "sure, widen the area" (should search Ontario, not repeat same failure)
 
 ## Known Issues (not yet fixed)
 <!-- Add new issues here as they're discovered -->

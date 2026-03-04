@@ -387,6 +387,15 @@ def _validate_filters(filters, user_text):
         is_negated = bool(activity_words & negated_words)
         if is_negated or not any(w in text for w in all_evidence_terms if len(w) > 1):
             validated['activity'] = None
+            # Recovery: Gemini may have normalised/mis-extracted the activity.
+            # Scan the raw user text for any known activity term and use that instead.
+            for _canonical, _terms in sorted(
+                _ACTIVITY_SYNONYM_MAP.items(),
+                key=lambda kv: -max(len(t) for t in kv[1])  # prefer longer matches first
+            ):
+                if any(t in text for t in _terms if len(t) > 2):
+                    validated['activity'] = _canonical
+                    break
 
     # Gender: must have an explicit gender word
     gender_words = ['girl', 'girls', 'boy', 'boys', 'female', 'male',
@@ -1871,9 +1880,10 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
             _suggested_region = _region_matches[0].strip()
             _tracer_log(f"process_query: AI suggested region='{_suggested_region}'")
 
-        # Pattern 2: "Want me to search all of PROVINCE?"
+        # Pattern 2: "Want me to search all of PROVINCE?" or
+        #            "I can search all of PROVINCE instead"
         _prov_match = _re_loc.search(
-            r"search all of\s+\*?\*?([A-Z][A-Za-z\s]+?)\*?\*?\s*\?",
+            r"search all of\s+\*?\*?([A-Z][A-Za-z\s]+?)(?:\*?\*?)(?:\s*\?|\s+instead\b)",
             last_assistant_msg
         )
         if _prov_match and not _suggested_region:
