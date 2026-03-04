@@ -1,3 +1,4 @@
+# CampSearch AI v2
 """
 Camp Discovery Chatbot - Production Version
 Business Logic: Client-Only Member Camps with Verified URLs
@@ -316,6 +317,7 @@ for _term, _canonical in {
     'climbing': 'rock climbing', 'ski': 'skiing', 'snowboard': 'snowboarding',
     'skate': 'skateboarding', 'bike': 'cycling', 'biking': 'cycling',
     'angling': 'fishing', 'freerunning': 'parkour',
+    'sea kayaking': 'kayaking', 'kayak': 'kayaking',
     'swim': 'swimming', 'swimming': 'swim',
     # Arts / performance
     'chef': 'cooking', 'culinary': 'cooking',
@@ -979,7 +981,8 @@ def search_camps(filters, config, limit=20, named_camp=None, engine=None):
         'ball hockey': 'hockey', 'ice hockey': 'hockey',
         'cheerleading': 'cheer', 'cheering': 'cheer',
         'swimming': 'swimming', 'swim': 'swimming',
-        'canoeing': 'canoeing', 'canoe': 'canoeing', 'kayaking': 'canoeing',
+        'canoeing': 'canoeing', 'canoe': 'canoeing',
+        'kayaking': 'kayaking', 'kayak': 'kayaking', 'sea kayaking': 'kayaking',
         'hoops': 'basketball',
         'karate': 'martial arts', 'taekwondo': 'martial arts',
         'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
@@ -2237,6 +2240,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         'ball hockey': 'hockey', 'ice hockey': 'hockey',
         'cheerleading': 'cheer', 'cheering': 'cheer',
         'swimming': 'swim', 'hoops': 'basketball',
+        'kayaking': 'kayaking', 'kayak': 'kayaking', 'sea kayaking': 'kayaking',
         'karate': 'martial arts', 'taekwondo': 'martial arts',
         'judo': 'martial arts', 'jiu jitsu': 'martial arts', 'kung fu': 'martial arts',
         'ninja': 'ninja warrior', 'trampolining': 'trampoline',
@@ -2294,6 +2298,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
         22: 'dance',       # covers: ballet, hip hop, jazz, tap, contemporary, lyrical, breakdancing, etc.
         37: 'music',       # covers: guitar, piano, drums, singing, DJing, songwriting, etc.
         59: 'theatre',     # covers: acting, musical theatre, playwriting, set design, etc.
+        41: 'paddle sports',  # covers: kayaking, sea kayaking, canoeing, rowing, paddleboard, etc.
     }
     # Activities that ARE the broad category (no refinement needed)
     _broad_category_names = set(BROAD_PARENT_CODES.values()) | {
@@ -2325,6 +2330,10 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                 'vocal training': [37], 'music recording': [37],
                 'acting': [59], 'musical theatre': [59, 37], 'drama': [59],
                 'playwriting': [59], 'set and costume design': [59],
+                # Paddle sports sub-activities (broad parent code 41)
+                'kayaking': [41], 'sea kayaking': [41], 'kayak': [41],
+                'rowing': [41], 'paddleboard': [41], 'stand up paddle': [41],
+                'whitewater': [41], 'waterskiing': [41], 'wakeboarding': [41],
             }
             _mapped_codes = _ACTIVITY_CODES_CHECK.get(_aq, [])
             if any(c in BROAD_PARENT_CODES for c in _mapped_codes):

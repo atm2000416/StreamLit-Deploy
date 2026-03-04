@@ -111,3 +111,12 @@ streamlit run streamlit_app.py
 
 - The AI's suggested location must be parsed from the assistant's last message using regex
 
+## Deployment
+Hosted on Streamlit Community Cloud. To deploy changes:
+1. `git add <files>` → `git commit` → `git push`
+2. Streamlit Cloud auto-deploys on push to main — no manual step needed.
+
+## Fix Tracking
+All fixes are tracked in FIXES.md. Before making any change, read it.
+After fixing a new issue, add it as the next numbered fix with the same format.
+Always update the /audit command to include the new fix's verification check.
