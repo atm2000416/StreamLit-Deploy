@@ -2444,13 +2444,17 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
 
         if raw_deduped:
             _max_sem = max(c.get('_semantic_score', 0) for c in raw_deduped)
+            _top_scores = sorted(
+                [(c.get('camp_name', '?'), round(c.get('_semantic_score', 0), 4)) for c in raw_deduped],
+                key=lambda x: -x[1]
+            )[:5]
 
             if _act_is_taxonomy and _max_sem < TAXONOMY_CONFIDENCE_THRESHOLD:
                 elapsed = time.time() - start
                 _tracer_log(
                     f"LOW-CONFIDENCE GATE (taxonomy): activity='{activity_query}' "
                     f"max_semantic={_max_sem:.4f} < {TAXONOMY_CONFIDENCE_THRESHOLD} "
-                    f"-> no matching camps"
+                    f"-> no matching camps | top scores: {_top_scores}"
                 )
                 _diag = _diagnose_availability(activity_query, filters, _search_engine, config)
                 return _build_no_results_response(
@@ -2463,7 +2467,7 @@ def process_query(user_text, config, client_camps, chat_history=None, last_filte
                 _tracer_log(
                     f"LOW-CONFIDENCE GATE: activity='{activity_query}' "
                     f"max_semantic={_max_sem:.4f} < {LOW_CONFIDENCE_THRESHOLD} "
-                    f"-> unrecognised activity"
+                    f"-> unrecognised activity | top scores: {_top_scores}"
                 )
                 return _build_no_results_response(
                     activity_query, filters, False, fallback
